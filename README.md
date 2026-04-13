@@ -1,39 +1,53 @@
-# Dépôt M1 SDHC
-Dépôt git qui regroupe l'ensemble du code utilisé dans la collecte, enrichissement, et analyse du corpus. 
-Corpus non inclu, disponible sur demande. 
+# Dépôt M1 SDHC 
+Ensemble du code utilisé dans le cadre du mémoire de M1 SDHC. 
 
-# Structure du dépôt
----
+Le corpus porte sur les publications de la chaîne Telegram du commandant de drones ukrainien Robert « *Magyar* » Brovdi ([@robert_magyar](https://t.me/robert_magyar)), de septembre 2022 à septembre 2025. Le corpus n'est pas inclus, mais la chaîne est publique et le code est reproductible.
 
+## Structure du dépôt
 
 ```
-├── 1a_scraper/          Collecte Telegram (Telethon) - JSONL brut + médias
-├── 2a_audio/            Transcription Whisper large-v3 (GPU)
-├── 2b_technique/        Métadonnées techniques ffprobe (résolution, durée, codec…)
-├── 2c_vision/           Keyframes (ffmpeg), OCR cyrillique (EasyOCR), PySceneDetect
-├── 2d_traduction/       Traduction SRT ukrainien français (DeepL / Mistral)
-├── 3a_lexicometrie/     Lemmatisation spaCy (uk_core_news_trf) + TF-IDF par phase
-└── 3b_quanti/           Analyses quantitatives et visualisations avec R
+├── 0_config/            Configuration centrale (config.yaml, utils.py)
+├── 1a_scraper/          Collecte Telegram via l'API officielle et la bibliothèque Telethon 
+├── 2a_metadonnees/      Métadonnées techniques via ffprobe (résolution, durée, codec…)
+├── 2b_transcription/    Transcription via Whisper 
+├── 2c_traduction/       Traduction des .srt de l'ukrainien au français (DeepL / LM Studio)
+├── 2d_vision/           Keyframes, OCR cyrillique, SceneDetect, InsightFace, CLIP, blasons
+│   ├── keyframes/             Extraction keyframes + détection de scènes
+│   │   ├── keyframer.py           Pipeline keyframes fixes (ffmpeg, 1/10s) + OCR + SceneDetect
+│   │   └── scene_detect.py        Détection de scènes standalone (HistogramDetector fallback)
+│   ├── faces/                 Détection des visages via InsightFace 
+│   ├── clip/                  Classification zero-shot via CLIP
+│   └── blasons/               Détection logos de brigade via SIFT & RANSAC
+├── 3a_lexicometrie/     Analyse textuelle (lemmatisation, TF-IDF...)
 ```
 
-# Utilisation
----
+La numérotation correspond à l'ordre d'exécution : (1) collecte, (2) enrichissement, (3) analyse. Le scraper produit un JSONL de base ; les étapes suivantes enrichissent incrémentalement ce fichier avec de nouveaux champs.
 
-Un README est inclu avec chaque script. Se référer au README inclue avec chaque protocole, mais la majorité fonctionne ainsi 
+## Configuration
 
-## Dépendances 
----
-- Python 3.11+
-- R 4.x avec les packages : `jsonlite`, `dplyr`, `ggplot2`, `lubridate`, `tidyr`, `scales`, `changepoint`, `bcp`
-- ffmpeg / ffprobe 
-- pytorch
-- Modèle spaCy : `python -m spacy download uk_core_news_trf`
-- Whisper
-- EasyOCR
-- Clé API DeepL pour la traduction 
+Copier le template et adapter les chemins locaux. `0_config/config.example.yaml` documente la structure complète.
 
-Une carte graphique avec CUDA est recommandée pour l'utilisation de Whisper et EasyOCR. 
+## Utilisation
 
-# Usage IA 
----
-Les scripts de ce dépôt ont été développés avec l'assistance de Claude Code (Anthropic). Tous les scripts ont été relus et testés manuellement.
+Se référer au README de chaque module. Tous les scripts sont paramétrables via CLI, type :
+```bash
+python3 script.py --input corpus.jsonl --output corpus_enriched.jsonl
+```
+
+L'utilisation sur d'autres chaînes Telegram n'est pas garantie, en particulier pour les langues autres que l'ukrainien (modifier le prompt Whisper, les modèles spaCy et OCR). 
+
+## Dépendances
+
+```bash
+pip install -r requirements.txt        # dépendances Python
+python3 -m spacy download uk_core_news_trf  # modèle spaCy ukrainien 
+sudo apt install ffmpeg                 # dépendance système
+```
+
+Un GPU CUDA est recommandé pour Whisper, EasyOCR et InsightFace. Le pipeline a été développé et testé sur une RTX 3080 (CUDA 12.8).
+
+Les modules qui nécessitent une clé API (scraper Telegram, traduction DeepL) lisent leurs credentials depuis un fichier `.env`. Un `.env.example` est fourni dans chaque module concerné.
+
+## Usage IA
+
+Les scripts ont été développés avec l'assistance de Claude Code (Opus 4.6). Chacun a été relu, commenté et testé manuellement.
