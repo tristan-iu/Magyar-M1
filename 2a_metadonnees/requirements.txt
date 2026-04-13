@@ -1,0 +1,2 @@
+# ffprobe_batch.py — aucune dépendance Python externe
+# Dépendance système : ffmpeg (sudo apt install ffmpeg)
