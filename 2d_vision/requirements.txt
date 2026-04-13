@@ -1,0 +1,8 @@
+easyocr>=1.7
+scenedetect[opencv]>=0.6
+opencv-python>=4.8
+Pillow>=10.0
+numpy>=1.24
+matplotlib>=3.7
+pandas>=1.5
+tqdm>=4.65

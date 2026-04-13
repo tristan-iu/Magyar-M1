@@ -1,0 +1,4 @@
+opencv-python>=4.4.0
+numpy>=1.24
+tqdm>=4.65
+PyYAML>=6.0

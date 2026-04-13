@@ -1,0 +1,7 @@
+transformers>=4.30
+torch>=2.0
+Pillow>=9.0
+tqdm>=4.60
+pandas>=1.5
+matplotlib>=3.6
+seaborn>=0.12
