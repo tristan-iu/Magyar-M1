@@ -1,0 +1,112 @@
+# config.example.yaml — TEMPLATE de configuration du projet Magyar
+# Copier en config.yaml et adapter les chemins à votre machine :
+#   cp config.example.yaml config.yaml
+#
+# config.yaml est dans .gitignore (chemins machine-dépendants).
+# Ce fichier (config.example.yaml) est commité et documente la structure.
+
+# ---------------------------------------------------------------------------
+# CHEMINS — à adapter selon votre installation
+# ---------------------------------------------------------------------------
+paths:
+  corpus_base:      "/path/to/M1_corpus/processed"
+  fiches_dir:       "/path/to/M1_corpus/processed/fiches"
+  keyframes_dir:    "/path/to/M1_corpus/processed/fiches/keyframes"
+  logs_dir:         "/path/to/M1_corpus/logs"
+
+  # JSONL enrichis (dans corpus_base/)
+  jsonl_ffprobe:         "messages_ffprobe.jsonl"
+  jsonl_whisper:         "messages_whisper.jsonl"
+  jsonl_computervision:  "messages_computervision.jsonl"
+  jsonl_faces:           "messages_faces.jsonl"
+  jsonl_enriched:        "messages_enriched.jsonl"
+
+  # JSONL local allégé (repo)
+  jsonl_stripped: "3b_stats_R/messages_stripped.jsonl"
+
+  # JSONL brut (scraper — hors corpus_base)
+  raw_path: "/path/to/M1_corpus/raw/messages.jsonl"
+
+  # Repo local
+  repo_base: "/path/to/M1_Magyar_repo"
+
+# ---------------------------------------------------------------------------
+# PHASES
+# ---------------------------------------------------------------------------
+phases:
+  P1:
+    label: "Artisanal"
+    start: "2022-09-02"
+    end:   "2023-12-31"
+    color: "#ece7f2"
+  P2:
+    label: "Semi-pro"
+    start: "2024-01-01"
+    end:   "2024-09-30"
+    color: "#a6bddb"
+  P3:
+    label: "Institutionnel"
+    start: "2024-10-01"
+    end:   "2025-09-30"
+    color: "#2b8cbe"
+
+# ---------------------------------------------------------------------------
+# MODÈLES 
+# ---------------------------------------------------------------------------
+models:
+  whisper:
+    model_name: "large-v3" # à adapter en fonction des besoins 
+    language: "uk"
+    # Prompt de décodage pour jargon militaire ukrainien
+    prompt: "Мадяр, дрони, FPV, скид, аеророзвідка, військовий жаргон, війна, 414 бригада"
+    device: "auto"          # "auto" = GPU si dispo, sinon CPU
+    compute_type: "float16" # float16 sur GPU, int8 sur CPU (géré par utils.py)
+
+  vad:
+    # Silero VAD (utilisé en pré-filtre Whisper)
+    threshold:      0.35
+    min_speech_ms:  200
+    min_silence_ms: 200
+    sampling_rate:  16000
+
+  spacy:
+    model_name: "uk_core_news_trf"
+    # Classes exclues de la lemmatisation — catégories sans charge sémantique
+    # thématique : ponctuation, chiffres, mots grammaticaux (pronoms, conjonctions,
+    # prépositions, déterminants, particules, interjections).
+    # PRON/DET/ADP/CCONJ/SCONJ/PART sont ajoutés car spaCy uk_core_news_trf
+    # les laisse passer malgré les stop_words par défaut.
+    excluded_pos: ["PUNCT", "SPACE", "SYM", "NUM", "X",
+                   "PRON", "DET", "ADP", "CCONJ", "SCONJ", "PART", "INTJ"]
+    min_lemma_length: 2
+
+  easyocr:
+    languages: ["ru", "uk", "en"]
+    gpu: true               # fallback CPU automatique si CUDA absent
+
+  insightface:
+    model_pack: "buffalo_l"
+    # Seuil cosine distance pour identifier Magyar (< threshold = match)
+    identity_threshold: 0.6
+    # Fréquence d'échantillonnage pour la détection (1 frame / N secondes)
+    sample_every_s: 10
+
+  clip:
+    model_name: "openai/clip-vit-large-patch14"
+    # Labels zero-shot pour classification de scène
+    scene_labels:
+      - "outdoor field"
+      - "trench"
+      - "armored vehicle"
+      - "drone POV"
+      - "indoor bunker"
+      - "person talking to camera"
+      - "FPV impact"
+      - "aerial footage"
+    # Labels thermique vs optique
+    thermal_labels:
+      - "thermal imaging camera"
+      - "optical camera"
+      - "FPV camera"
+      - "night vision"
+
