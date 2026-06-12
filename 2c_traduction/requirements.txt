@@ -1,5 +1,17 @@
+# ── Traduction uk→fr (translate_srt.py) ─────────────────────────────────────
+# deepl        : moteur principal (API DeepL, clé dans .env). Import paresseux
+#                dans TraducteurDeepL — requis seulement si on utilise ce moteur.
+# python-dotenv: charge 2c_traduction/.env (DEEPL_AUTH_KEY, LMSTUDIO_*).
 deepl
-tqdm
 python-dotenv
-transformers
-torch
+
+# ── Fallback local (optionnel) ──────────────────────────────────────────────
+# openai : client OpenAI-compatible utilisé par TraducteurLMStudio pour parler
+#          à un serveur local (LM Studio :1234/v1 ou Ollama :11434/v1).
+#          Import paresseux — nécessaire uniquement si DeepL est absent et qu'on
+#          bascule sur le moteur local.
+openai
+
+# ── Partagé ─────────────────────────────────────────────────────────────────
+# pyyaml : requis par 0_config/utils.py (load_config).
+pyyaml>=6.0

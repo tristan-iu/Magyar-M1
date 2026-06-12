@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Traduction uk→fr du corpus Magyar (caption, dialogue, whisper_segments).
+Traduction uk→fr du corpus Magyar (legende, dialogue, whisper_segments).
 
-Pas de JSONL de sortie : les traductions vivent dans les fiches individuelles
-(caption_fr, dialogue_fr) et dans les fichiers robert_magyar_{id}_fr.srt.
+Écrit `legende_fr` et `dialogue_fr` dans le JSONL ET dans la fiche.
+Le SRT français vit dans les fichiers robert_magyar_{id}_fr.srt à côté du média.
 
 Pipeline :
   1. Sélectionner les messages avec du contenu cyrillique à traduire
   2. Détecter le moteur disponible (deepl → lmstudio)
-  3. Traduire caption / dialogue / segments Whisper
-  4. Écrire dans la fiche JSON + fichier SRT
+  3. Traduire legende / dialogue / segments Whisper
+  4. Écrire dans le JSONL + fiche JSON + fichier SRT
 
-Options CLI : --input, --engine, --fiches-dir, --dry-run, --limit, --ids,
-              --overwrite, --start-date, --end-date, --config
+Options CLI : --input, --output, --engine, --fiches-dir, --dry-run, --limit,
+              --ids, --overwrite, --start-date, --end-date, --config
 """
+import logging
 import os
 import re
 import sys
@@ -27,15 +28,20 @@ _UTILS_DIR = Path(__file__).resolve().parents[1] / "0_config"
 sys.path.insert(0, str(_UTILS_DIR))
 from utils import (  # noqa: E402
     CYRILLIC_RE,
-    ProgressTracker,
-    build_base_parser,
-    filter_eligible,
+    SuiviProgression,
+    creer_parser_base,
+    filtrer_eligibles,
     load_config,
-    load_fiche,
+    charger_fiche,
     read_jsonl,
-    setup_logging,
-    update_fiche,
+    init_logger,
+    mettre_a_jour_fiche,
+    write_jsonl,
 )
+
+# Logger module : configuré par init_logger("translation") dans main().
+# Les classes/fonctions ci-dessous l'utilisent via cette variable globale.
+log = logging.getLogger("translation")
 
 
 def _fmt_srt_time(seconds: float) -> str:
@@ -49,7 +55,7 @@ def _fmt_srt_time(seconds: float) -> str:
     return f"{hours:02d}:{mins:02d}:{secs:02d},{ms:03d}"
 
 
-def format_srt(segments: list[dict]) -> str:
+def formater_srt(segments: list[dict]) -> str:
     """Reconstruit un fichier SRT à partir de segments {start, end, text}."""
     blocks = []
     for i, seg in enumerate(segments, 1):
@@ -59,9 +65,61 @@ def format_srt(segments: list[dict]) -> str:
     return "\n".join(blocks) + "\n"
 
 
+def _analyser_srt_uk(srt_path: Path) -> list[dict]:
+    """Parse un fichier SRT ukrainien en liste de segments {start, end, text}.
+
+    Remplace la lecture de `whisper_segments` depuis la fiche (champ supprimé
+    du schéma propre post-migration). Lit directement le fichier .srt sur disque.
+
+    Convention fichier : {canal}_{message_id}.srt (dans le même dossier que le média)
+
+    Entrée : srt_path — chemin vers le fichier SRT ukrainien
+    Sortie : liste de dicts {start: float, end: float, text: str}
+    """
+    if not srt_path.is_file():
+        return []
+
+    segments: list[dict] = []
+    try:
+        contenu = srt_path.read_text(encoding="utf-8")
+        # Format SRT : blocs séparés par une ligne vide
+        # Chaque bloc : numéro \n timestamp --> timestamp \n texte
+        blocs = [b.strip() for b in contenu.split("\n\n") if b.strip()]
+        for bloc in blocs:
+            lignes = [l.strip() for l in bloc.splitlines() if l.strip()]
+            if len(lignes) < 3:
+                continue  # bloc incomplet
+            # Ligne 1 : numéro (on l'ignore)
+            # Ligne 2 : "HH:MM:SS,mmm --> HH:MM:SS,mmm"
+            # Ligne 3+ : texte (peut s'étaler sur plusieurs lignes)
+            timestamp_ligne = lignes[1]
+            if " --> " not in timestamp_ligne:
+                continue
+            debut_str, fin_str = timestamp_ligne.split(" --> ", 1)
+            texte = " ".join(lignes[2:])
+
+            def _ts_to_sec(ts: str) -> float:
+                ts = ts.replace(",", ".")
+                parties = ts.strip().split(":")
+                if len(parties) == 3:
+                    h, m, s = parties
+                    return int(h) * 3600 + int(m) * 60 + float(s)
+                return 0.0
+
+            segments.append({
+                "start": _ts_to_sec(debut_str),
+                "end": _ts_to_sec(fin_str),
+                "text": texte,
+            })
+    except Exception:
+        pass  # SRT corrompu : on retourne liste vide, le caller gère
+
+    return segments
+
+
 # ── Détection langue ──────────────────────────────────────────────────────────
 
-def _needs_translation(text: str) -> bool:
+def _a_besoin_traduction(text: str) -> bool:
     """True si le texte contient au moins 2 caractères cyrilliques.
 
     Entrée : text — str quelconque
@@ -74,7 +132,7 @@ def _needs_translation(text: str) -> bool:
 
 # ── Translateurs ──────────────────────────────────────────────────────────────
 
-class DeepLTranslator:
+class TraducteurDeepL:
     name = "deepl"
 
     def __init__(self):
@@ -84,13 +142,13 @@ class DeepLTranslator:
             raise EnvironmentError("DEEPL_AUTH_KEY absent du .env")
         self.client = deepl.Translator(auth_key)
 
-    def translate(self, text: str) -> str:
-        if not _needs_translation(text):
+    def traduire(self, text: str) -> str:
+        if not _a_besoin_traduction(text):
             return text
         result = self.client.translate_text(text, source_lang="UK", target_lang="FR")
         return result.text
 
-    def translate_batch(self, texts: list[str]) -> list[str]:
+    def traduire_lot(self, texts: list[str]) -> list[str]:
         """Traduit une liste de textes en un seul appel API DeepL (préserve l'ordre).
 
         Entrée : texts — liste de str (certains peuvent ne pas nécessiter de traduction)
@@ -98,7 +156,7 @@ class DeepLTranslator:
         """
         if not texts:
             return []
-        indices = [i for i, t in enumerate(texts) if _needs_translation(t)]
+        indices = [i for i, t in enumerate(texts) if _a_besoin_traduction(t)]
         if not indices:
             return texts[:]
         results = self.client.translate_text(
@@ -110,7 +168,7 @@ class DeepLTranslator:
         return out
 
 
-class LMStudioTranslator:
+class TraducteurLMStudio:
     name = "lmstudio"
 
     _SYSTEM_PROMPT = (
@@ -138,7 +196,7 @@ class LMStudioTranslator:
             if not models.data:
                 raise ConnectionError("Aucun modèle chargé dans LM Studio")
             self._model = models.data[0].id
-        print(f"  LM Studio — modèle : {self._model}  url : {base_url}")
+        log.info("  LM Studio — modèle : %s  url : %s", self._model, base_url)
 
     def _call(self, user_text: str) -> str:
         resp = self._client.chat.completions.create(
@@ -148,16 +206,21 @@ class LMStudioTranslator:
                 {"role": "user", "content": user_text},
             ],
             temperature=0.1,
-            max_tokens=4096,  # assez large pour les dialogues longs
+            # ⚠️ Tronque silencieusement les dialogues très longs : les plus
+            # gros du corpus font ~55k caractères (#889, #1058) → bien au-delà
+            # de 4096 tokens de sortie. DeepL n'a pas cette limite (découpe en
+            # interne). Le fallback LMStudio reste destiné à la consultation ;
+            # pour traduire le corpus complet, préférer DeepL.
+            max_tokens=4096,
         )
         return resp.choices[0].message.content.strip()
 
-    def translate(self, text: str) -> str:
-        if not _needs_translation(text):
+    def traduire(self, text: str) -> str:
+        if not _a_besoin_traduction(text):
             return text
         return self._call(text)
 
-    def translate_batch(self, texts: list[str], chunk_size: int = 10) -> list[str]:
+    def traduire_lot(self, texts: list[str], chunk_size: int = 10) -> list[str]:
         """Traduit par chunks numérotés ; fallback segment par segment si la réponse est malformée.
 
         On envoie les segments par paquets de chunk_size pour limiter les appels LLM,
@@ -168,7 +231,7 @@ class LMStudioTranslator:
         """
         if not texts:
             return []
-        indices = [i for i, t in enumerate(texts) if _needs_translation(t)]
+        indices = [i for i, t in enumerate(texts) if _a_besoin_traduction(t)]
         if not indices:
             return texts[:]
 
@@ -181,16 +244,18 @@ class LMStudioTranslator:
                 "Conserve exactement les numéros. Retourne uniquement les lignes traduites.\n\n"
                 + numbered
             )
-            translated_chunk = None
+            lot_traduit = None
             try:
                 raw = self._call(prompt)
-                translated_chunk = _parse_numbered(raw, expected_count=len(chunk_idx))
-            except Exception:
-                pass
+                lot_traduit = _analyser_numerote(raw, expected_count=len(chunk_idx))
+            except (ValueError, KeyError, AttributeError, IndexError) as e:
+                # On signale le passage en mode individuel (parsing ou API LMStudio défaillant)
+                # pour ne pas masquer un bug silencieux ; le fallback ci-dessous prend le relais.
+                log.warning("[traduire_lot] chunk parse failed, fallback individual: %s", e)
 
-            if translated_chunk is not None:
+            if lot_traduit is not None:
                 for j, i in enumerate(chunk_idx):
-                    out[i] = translated_chunk[j]
+                    out[i] = lot_traduit[j]
             else:
                 # Fallback individuel pour ce chunk
                 for i in chunk_idx:
@@ -201,7 +266,7 @@ class LMStudioTranslator:
         return out
 
 
-def _parse_numbered(raw: str, expected_count: int) -> list[str] | None:
+def _analyser_numerote(raw: str, expected_count: int) -> list[str] | None:
     """Parse une réponse LLM numérotée ("1. texte\n2. texte\n...").
 
     Entrée : raw — réponse brute du LLM, expected_count — nb de lignes attendues
@@ -217,106 +282,111 @@ def _parse_numbered(raw: str, expected_count: int) -> list[str] | None:
 
 # ── Sélection du moteur ───────────────────────────────────────────────────────
 
-def detect_engine(force: str | None):
+def selectionner_moteur(force: str | None):
     """Retourne un translateur disponible, ou quitte avec une erreur.
 
     Auto-détection : essaie deepl d'abord, puis lmstudio. Si --engine est fourni,
     tente uniquement ce moteur et échoue explicitement s'il est indisponible.
 
     Entrée : force — nom du moteur imposé ou None
-    Sortie : instance DeepLTranslator ou LMStudioTranslator
+    Sortie : instance TraducteurDeepL ou TraducteurLMStudio
     """
     candidates = [
-        ("deepl",    lambda: DeepLTranslator()),
-        ("lmstudio", lambda: LMStudioTranslator()),
+        ("deepl",    lambda: TraducteurDeepL()),
+        ("lmstudio", lambda: TraducteurLMStudio()),
     ]
     if force:
         for name, factory in candidates:
             if name == force:
                 try:
                     t = factory()
-                    print(f"Moteur : {name}")
+                    log.info("Moteur : %s", name)
                     return t
                 except Exception as e:
-                    print(f"ERREUR : --engine {force} demandé mais indisponible : {e}")
+                    log.error("ERREUR : --engine %s demandé mais indisponible : %s", force, e)
                     sys.exit(1)
-        print(f"ERREUR : moteur inconnu '{force}'")
+        log.error("ERREUR : moteur inconnu '%s'", force)
         sys.exit(1)
 
     for name, factory in candidates:
         try:
             t = factory()
-            print(f"Moteur auto-détecté : {name}")
+            log.info("Moteur auto-détecté : %s", name)
             return t
         except Exception:
             continue
 
-    print(
+    log.error(
         "ERREUR : aucun moteur disponible.\n"
-        "  → Ajouter DEEPL_AUTH_KEY dans 2d_traduction/.env\n"
-        "  → Ou démarrer LM Studio (http://127.0.0.1:1234) et installer : pip install openai"
+        "  → Ajouter DEEPL_AUTH_KEY dans 2c_traduction/.env\n"
+        "  → Ou démarrer un serveur local OpenAI-compatible (LM Studio :1234 ou "
+        "Ollama :11434) ; définir LMSTUDIO_BASE_URL et installer : pip install openai"
     )
     sys.exit(1)
 
 
 # ── Traitement d'un message ───────────────────────────────────────────────────
 
-def process_message(
+def traiter_message(
     msg: dict,
-    translator,
+    traducteur,
     fiches_dir: Path,
     overwrite: bool,
     dry_run: bool,
     log,
 ) -> tuple[bool, bool, bool]:
-    """Traduit caption / dialogue / whisper_segments d'un message.
+    """Traduit legende / dialogue / whisper_segments d'un message.
 
-    Chaque opération est indépendante : un échec SRT ne bloque pas caption/dialogue.
-    Écrit directement dans la fiche individuelle + fichier SRT.
+    Chaque opération est indépendante : un échec SRT ne bloque pas legende/dialogue.
+    Écrit dans le JSONL (msg) + fiche individuelle + fichier SRT.
 
-    Entrée : msg — dict message JSONL, translator — instance DeepL ou LMStudio,
+    Entrée : msg — dict message JSONL, traducteur — instance DeepL ou LMStudio,
              fiches_dir — Path, overwrite — bool, dry_run — bool, log — logger
-    Sortie : tuple (did_caption bool, did_dialogue bool, did_srt bool)
+    Sortie : tuple (did_legende bool, did_dialogue bool, did_srt bool)
     """
     mid = msg["message_id"]
-    fiche = load_fiche(msg, fiches_dir)
+    channel = msg.get("canal", "robert_magyar")
+    fiche = charger_fiche(msg, fiches_dir)
 
-    caption      = fiche.get("caption")      or msg.get("caption")
-    dialogue     = fiche.get("dialogue")     or msg.get("dialogue")
-    whisper_segs = fiche.get("whisper_segments") or msg.get("whisper_segments") or []
+    legende      = msg.get("legende") or fiche.get("legende")
+    dialogue     = msg.get("dialogue") or fiche.get("dialogue")
 
-    if not caption and not dialogue and not whisper_segs:
+    # On lit le SRT UK directement sur disque (whisper_segments absent du schéma propre).
+    # Convention : {canal}_{message_id}.srt dans le même dossier que fiches_dir.
+    srt_uk_path = fiches_dir / f"{channel}_{mid}.srt"
+    whisper_segs = _analyser_srt_uk(srt_uk_path)
+
+    if not legende and not dialogue and not whisper_segs:
         return False, False, False
 
-    srt_fr_name = f"robert_magyar_{mid}_fr.srt"
+    srt_fr_name = f"{channel}_{mid}_fr.srt"
     srt_fr_path = fiches_dir / srt_fr_name
 
-    do_caption  = bool(caption)      and (overwrite or "caption_fr"  not in fiche)
-    do_dialogue = bool(dialogue)     and (overwrite or "dialogue_fr" not in fiche)
+    do_legende  = bool(legende)      and (overwrite or "legende_fr"  not in msg)
+    do_dialogue = bool(dialogue)     and (overwrite or "dialogue_fr" not in msg)
     do_srt      = bool(whisper_segs) and (overwrite or not srt_fr_path.exists())
 
-    if not do_caption and not do_dialogue and not do_srt:
+    if not do_legende and not do_dialogue and not do_srt:
         return False, False, False
 
-    # Chaque opération est indépendante : un échec SRT ne détruit pas caption/dialogue.
+    did_legende = did_dialogue = did_srt = False
 
-    did_caption = did_dialogue = did_srt = False
-
-    # ── Caption ────────────────────────────────────────────────────────────
-    if do_caption:
+    # ── Légende ────────────────────────────────────────────────────────────
+    if do_legende:
         if dry_run:
-            print(f"  [dry-run] caption  msg {mid}: {caption[:70]!r}")
-            did_caption = True
+            print(f"  [dry-run] legende  msg {mid}: {legende[:70]!r}")
+            did_legende = True
         else:
             try:
-                caption_fr = translator.translate(caption)
-                update_fiche(msg, {"caption_fr": caption_fr}, fiches_dir, overwrite=overwrite)
-                did_caption = True
-                log.info(f"msg {mid} | caption | OK")
+                legende_fr = traducteur.traduire(legende)
+                msg["legende_fr"] = legende_fr
+                mettre_a_jour_fiche(msg, {"legende_fr": legende_fr}, fiches_dir, overwrite=overwrite)
+                did_legende = True
+                log.info(f"msg {mid} | legende | OK")
             except Exception as e:
                 if "QuotaExceeded" in type(e).__name__:
                     raise
-                log.warning(f"msg {mid} | caption | ERROR:{e}")
+                log.warning(f"msg {mid} | legende | ERROR:{e}")
 
     # ── Dialogue ───────────────────────────────────────────────────────────
     if do_dialogue:
@@ -325,8 +395,9 @@ def process_message(
             did_dialogue = True
         else:
             try:
-                dialogue_fr = translator.translate(dialogue)
-                update_fiche(msg, {"dialogue_fr": dialogue_fr}, fiches_dir, overwrite=overwrite)
+                dialogue_fr = traducteur.traduire(dialogue)
+                msg["dialogue_fr"] = dialogue_fr
+                mettre_a_jour_fiche(msg, {"dialogue_fr": dialogue_fr}, fiches_dir, overwrite=overwrite)
                 did_dialogue = True
                 log.info(f"msg {mid} | dialogue | OK")
             except Exception as e:
@@ -342,21 +413,20 @@ def process_message(
             did_srt = True
         else:
             try:
-                translated_texts = translator.translate_batch(texts)
-                translated_segs = [
+                textes_traduits = traducteur.traduire_lot(texts)
+                segments_traduits = [
                     {**seg, "text": t}
-                    for seg, t in zip(whisper_segs, translated_texts)
+                    for seg, t in zip(whisper_segs, textes_traduits)
                 ]
-                srt_fr_path.write_text(format_srt(translated_segs), encoding="utf-8")
-                update_fiche(msg, {"srt_fr_path": f"fiches/{srt_fr_name}"}, fiches_dir, overwrite=overwrite)
+                srt_fr_path.write_text(formater_srt(segments_traduits), encoding="utf-8")
                 did_srt = True
-                log.info(f"msg {mid} | srt | OK:{len(translated_segs)} segments")
+                log.info(f"msg {mid} | srt | OK:{len(segments_traduits)} segments")
             except Exception as e:
                 if "QuotaExceeded" in type(e).__name__:
                     raise
                 log.warning(f"msg {mid} | srt | ERROR:{e}")
 
-    return did_caption, did_dialogue, did_srt
+    return did_legende, did_dialogue, did_srt
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -364,10 +434,10 @@ def process_message(
 def main():
     load_dotenv(Path(__file__).parent / ".env")
 
-    parser = build_base_parser(
-        "Traduction uk→fr : caption / dialogue / whisper_segments → fiche + SRT",
+    parser = creer_parser_base(
+        "Traduction uk→fr : legende / dialogue / whisper_segments → JSONL + fiche + SRT",
         has_input=True,
-        has_output=False,
+        has_output=True,
     )
     parser.add_argument(
         "--engine",
@@ -390,9 +460,10 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    log = setup_logging("translation", cfg=cfg)
+    log = init_logger("translation", cfg=cfg)
 
     input_path = Path(args.input).resolve()
+    output_path = Path(args.output).resolve()
     fiches_dir = (args.fiches_dir or Path(cfg["paths"]["fiches_dir"])).resolve()
 
     if not input_path.is_file():
@@ -402,40 +473,41 @@ def main():
         log.error(f"Dossier fiches introuvable : {fiches_dir}")
         sys.exit(1)
 
-    translator = detect_engine(args.engine)
+    traducteur = selectionner_moteur(args.engine)
 
     messages = read_jsonl(input_path)
     log.info(f"Corpus : {len(messages)} messages")
 
-    ids_filter = set(args.ids) if args.ids else None
-    eligible = filter_eligible(
+    filtre_ids = set(args.ids) if args.ids else None
+    eligibles = filtrer_eligibles(
         messages,
-        ids_filter=ids_filter,
+        filtre_ids=filtre_ids,
         start_date=args.start_date,
         end_date=args.end_date,
         limit=args.limit,
         overwrite=args.overwrite,
     )
-    n_eligible = len(eligible)
-    log.info(f"Messages à traiter : {n_eligible}")
+    n_eligibles = len(eligibles)
+    log.info(f"Messages à traiter : {n_eligibles}")
 
-    if n_eligible == 0:
+    if n_eligibles == 0:
         log.info("Rien à faire.")
         return
 
-    tracker = ProgressTracker(n_eligible, label="traduction")
-    processed = 0
-    errors = 0
+    tracker = SuiviProgression(n_eligibles, label="traduction")
+    n_traites = 0
+    n_erreurs = 0
+    save_every = 50
 
     try:
-        for rank, idx in enumerate(eligible):
+        for rank, idx in enumerate(eligibles):
             msg = messages[idx]
             mid = msg.get("message_id", "?")
 
             try:
-                did_caption, did_dialogue, did_srt = process_message(
+                did_legende, did_dialogue, did_srt = traiter_message(
                     msg=msg,
-                    translator=translator,
+                    traducteur=traducteur,
                     fiches_dir=fiches_dir,
                     overwrite=args.overwrite,
                     dry_run=args.dry_run,
@@ -446,25 +518,30 @@ def main():
                     log.error(f"Quota DeepL dépassé après {rank} messages.")
                     break
                 log.warning(f"msg {mid} | FATAL:{e}")
-                errors += 1
-                tracker.tick(rank, mid, "erreur ✗")
+                n_erreurs += 1
+                tracker.avancer(rank, mid, "erreur ✗")
                 continue
 
             parts = (
-                (["caption"] if did_caption else [])
+                (["legende"] if did_legende else [])
                 + (["dialogue"] if did_dialogue else [])
                 + (["srt"] if did_srt else [])
             )
             if parts:
-                processed += 1
-                tracker.tick(rank, mid, ", ".join(parts) + " ✓")
+                n_traites += 1
+                tracker.avancer(rank, mid, ", ".join(parts) + " ✓")
+                if not args.dry_run and n_traites % save_every == 0:
+                    write_jsonl(messages, output_path)
             else:
-                tracker.tick(rank, mid, "skip")
+                tracker.avancer(rank, mid, "skip")
 
     except KeyboardInterrupt:
-        log.info("\nInterruption clavier.")
+        log.info("\nInterruption clavier — sauvegarde en cours...")
+    finally:
+        if not args.dry_run:
+            write_jsonl(messages, output_path)
 
-    tracker.summary(errors=errors, skipped=n_eligible - processed - errors)
+    tracker.resumer(errors=n_erreurs, skipped=n_eligibles - n_traites - n_erreurs)
 
 
 if __name__ == "__main__":

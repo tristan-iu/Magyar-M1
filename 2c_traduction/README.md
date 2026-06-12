@@ -11,70 +11,47 @@ pip install -r requirements.txt
 
 ## Configuration
 
-Éditer `.env` (présent, non versionné) :
+Copier `.env.example` → `.env` (non versionné) et le compléter :
 
 ```env
 # Moteur 1 — DeepL (optionnel, voir Méthodologie)
 DEEPL_AUTH_KEY=votre_clé_deepl
 
-# Moteur 2 — LM Studio (défaut si DeepL absent)
+# Moteur 2 — serveur local OpenAI-compatible (défaut si DeepL absent)
+# Fonctionne avec LM Studio (:1234/v1) comme avec Ollama (:11434/v1)
 LMSTUDIO_BASE_URL=http://127.0.0.1:1234/v1
 LMSTUDIO_API_KEY=lm-studio
-LMSTUDIO_MODEL=                # laisser vide = premier modèle chargé dans LM Studio
+LMSTUDIO_MODEL=                # laisser vide = premier modèle chargé sur le serveur
 ```
 
-## Usage
+## Utilisation
 
 ```bash
-# Auto-détection moteur (deepl si clé présente, sinon lmstudio)
-python translate_srt.py --input /chemin/messages_whisper.jsonl
-
-# Forcer un moteur
-python translate_srt.py --input messages_whisper.jsonl --engine lmstudio
-
-# Aperçu sans écrire
-python translate_srt.py --input messages_whisper.jsonl --dry-run
-
-# Messages spécifiques
-python translate_srt.py --input messages_whisper.jsonl --ids 8 100 200
-
-# Retraduire même si déjà fait
-python translate_srt.py --input messages_whisper.jsonl --overwrite
-
-# Fenêtre temporelle
-python translate_srt.py --input messages_whisper.jsonl --start-date 2024-01-01
+# Moteur auto-détecté : deepl si DEEPL_AUTH_KEY présent, sinon lmstudio
+python translate_srt.py --input messages_whisper.jsonl --output messages_whisper.jsonl
+#   --engine deepl|lmstudio    force un moteur
+#   --dry-run                  aperçu sans écrire
+#   --limit N                  N messages max
+#   --ids 8 100 200            messages spécifiques
+#   --overwrite                retraduit même si déjà fait
+#   --start-date / --end-date  fenêtre temporelle (YYYY-MM-DD)
+#   --fiches-dir DIR           dossier des fiches JSON (défaut : config.yaml)
 ```
-
-### Options CLI
-
-| Argument | Défaut | Description |
-|----------|--------|-------------|
-| `--input` | requis | JSONL source (avec champs Whisper) |
-| `--engine` | auto | `deepl` ou `lmstudio` |
-| `--fiches-dir` | config | Dossier des fiches JSON |
-| `--dry-run` | false | Afficher sans écrire |
-| `--limit` | aucune | N messages max |
-| `--ids` | tous | Message IDs spécifiques |
-| `--overwrite` | false | Retraduire les messages déjà traduits |
-| `--start-date` | aucune | Filtrer à partir de YYYY-MM-DD |
-| `--end-date` | aucune | Filtrer jusqu'à YYYY-MM-DD |
 
 ## Input / Output
 
-**Entrée :** JSONL avec `caption`, `dialogue` et/ou `whisper_segments` en cyrillique.
-
-**Pas de JSONL de sortie** : les traductions vivent dans les fiches individuelles.
+**Entrée :** JSONL avec `legende`, `dialogue` et/ou SRT cyrillique sur disque.
 
 Pour chaque message traité :
 
 | Sortie | Description |
 |--------|-------------|
-| `caption_fr` dans la fiche JSON | Traduction de la légende Telegram |
-| `dialogue_fr` dans la fiche JSON | Traduction du dialogue extrait |
-| `robert_magyar_{id}_fr.srt` | Fichier SRT traduit dans `fiches/` |
-| `srt_fr_path` dans la fiche JSON | Chemin relatif vers le SRT traduit |
+| `legende_fr` dans le JSONL et la fiche | Traduction de la légende Telegram |
+| `dialogue_fr` dans le JSONL et la fiche | Traduction du dialogue extrait |
+| `robert_magyar_{id}_fr.srt` | Fichier SRT traduit dans `fiches/` (chemin déductible) |
 
-Les messages sans contenu cyrillique sont silencieusement ignorés.
+Les messages sans contenu cyrillique sont silencieusement ignorés. Le chemin SRT
+français n'est pas persisté en JSONL (déductible : `fiches/{canal}_{message_id}_fr.srt`).
 
 ## Méthodologie
 
@@ -84,4 +61,6 @@ Les messages sans contenu cyrillique sont silencieusement ignorés.
 
 **Traduction par batch (LM Studio)** : les segments Whisper sont envoyés par paquets de 10 lignes numérotées pour limiter les appels LLM. Un chunk dont la réponse est mal parsée (mauvais compte de lignes) repasse en mode individuel segment par segment.
 
-**Idempotence** : `caption_fr` et `dialogue_fr` ne sont pas écrasés sans `--overwrite`. Le SRT est vérifié par existence de fichier.
+**Limite LM Studio — dialogues longs** : le champ `dialogue` complet est traduit en un seul appel, plafonné à 4096 tokens de sortie. Les dialogues les plus longs du corpus (~55 000 caractères, ex. #889, #1058) sont donc **tronqués silencieusement** par le moteur local. DeepL n'a pas cette limite (découpage interne). Pour traduire l'intégralité du corpus, utiliser DeepL ; le fallback LM Studio convient pour de la consultation ponctuelle.
+
+**Idempotence** : `legende_fr` et `dialogue_fr` ne sont pas écrasés sans `--overwrite`. Le SRT est vérifié par existence de fichier.
