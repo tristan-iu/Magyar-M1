@@ -1,3 +1,24 @@
+# ── Transcription Whisper (whisper_batch.py) ────────────────────────────────
+# openai-whisper : modèle large-v3. torch : GPU CUDA + chargement du VAD via
+# torch.hub. torchaudio : dépendance transitive de whisper (le décodage audio
+# lui-même passe par ffmpeg, cf. _lire_audio_ffmpeg).
 openai-whisper
 torch
 torchaudio
+
+# ── Silero VAD ──────────────────────────────────────────────────────────────
+# PAS de paquet pip : le VAD est chargé via torch.hub.load("snakers4/silero-vad"),
+# qui clone le dépôt GitHub au premier run (puis le met en cache dans
+# ~/.cache/torch/hub). Nécessite donc juste torch + un accès réseau à GitHub la
+# première fois. Le paquet `silero-vad` n'est jamais importé par le code.
+
+# ── QA transcription (qa_whisper.py) ────────────────────────────────────────
+# Pas de dépendance externe : lecture JSONL + heuristiques sur les segments.
+# Les patterns d'hallucination sont chargés depuis un YAML via PyYAML (déjà
+# tiré par le venv principal au travers de 0_config/utils.py).
+
+# ── Audio segmentation (audio_segmentation.py — venv SÉPARÉ !) ──────────────
+# inaSpeechSegmenter (licence CC-BY-NC) + TensorFlow 2.16+ doivent être
+# installés dans un venv_ina/ dédié : conflit cuDNN avec torch sur le même venv.
+#   python3.11 -m venv ../venv_ina
+#   ../venv_ina/bin/pip install inaSpeechSegmenter "tensorflow>=2.16,<2.17"

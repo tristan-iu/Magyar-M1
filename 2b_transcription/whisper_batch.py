@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
 Transcription audio batch via Whisper + Silero-VAD.
-Enrichit le JSONL avec : dialogue, has_speech, speech_language,
-speech_confidence, speech_duration, speech_ratio, whisper_segments, srt_path.
+Enrichit le JSONL avec : dialogue, parole_present, parole_duree, parole_ratio.
+Le SRT est écrit à côté du média (chemin déductible : channel_mid.srt).
+Les segments bruts ne sont plus persistés (ils gonflaient le JSONL de ~16 MB) :
+conséquence — les `avg_logprob`/`no_speech_prob` calculés ici ne sont disponibles
+qu'au moment du run. C'est pourquoi `qa_whisper.py` ne peut pas recalculer
+`dialogue_confiance` a posteriori sans re-transcrire (cf. son garde-fou).
 
 Pipeline par message :
   1. VAD (Silero) — détecte la présence/durée de parole
@@ -10,16 +14,17 @@ Pipeline par message :
   3. Filtrage qualité — rejette les hallucinations (confidence, ratio cyrillique)
   4. SRT — génère un fichier sous-titres à côté du média
 
-Options CLI : --model, --language, --vad-threshold, --vad-gate, --limit, --overwrite
+Options CLI : --model, --language, --vad-threshold, --min-speech-ms, --min-silence-ms,
+              --vad-gate, + options standard (--input, --output, --media-dir, --limit,
+              --overwrite, --ids, --start-date, --end-date, --config)
 
 Dépendances : openai-whisper, torch, torchaudio
 """
-import json
+import logging
 import math
 import os
 import re
 import sys
-import time
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -29,16 +34,21 @@ from pathlib import Path
 _UTILS_DIR = Path(__file__).resolve().parents[1] / "0_config"
 sys.path.insert(0, str(_UTILS_DIR))
 from utils import (  # noqa: E402
-    build_base_parser,
+    creer_parser_base,
     load_config,
-    setup_logging,
+    init_logger,
     read_jsonl,
     write_jsonl,
-    update_fiche,
-    filter_eligible,
-    ProgressTracker,
+    mettre_a_jour_fiche,
+    filtrer_eligibles,
+    SuiviProgression,
     CYRILLIC_RE,
 )
+
+# Logger module-level partagé : configuré par init_logger("whisper") dans main().
+# Les singletons de chargement (charger_whisper/charger_vad) l'utilisent sans
+# qu'on ait à leur passer le logger en argument.
+log = logging.getLogger("whisper")
 
 LATIN_ARTIFACT_RE = re.compile(r"[a-zA-Z]+")
 
@@ -62,7 +72,7 @@ _vad_model = None
 _vad_utils = None
 
 
-def load_whisper(model_name: str = "large-v3"):
+def charger_whisper(model_name: str = "large-v3"):
     """Charge le modèle Whisper sur GPU si disponible, sinon CPU.
 
     Entrée : model_name — str identifiant du modèle (ex: "large-v3", "medium")
@@ -73,7 +83,7 @@ def load_whisper(model_name: str = "large-v3"):
     if _whisper_model is None:
         import whisper
 
-        print(f"  Chargement Whisper '{model_name}' sur CPU...")
+        log.info("Chargement Whisper '%s' sur CPU...", model_name)
         _whisper_model = whisper.load_model(model_name, device="cpu")
 
         if torch.cuda.is_available():
@@ -85,12 +95,12 @@ def load_whisper(model_name: str = "large-v3"):
                     m.float()
 
         p = next(_whisper_model.parameters())
-        print("WHISPER", p.device, p.dtype)
+        log.info("Whisper chargé (%s, %s)", p.device, p.dtype)
 
     return _whisper_model
 
 
-def _read_audio_ffmpeg(audio_path: str, sampling_rate: int = 16000) -> "torch.Tensor":
+def _lire_audio_ffmpeg(audio_path: str, sampling_rate: int = 16000) -> "torch.Tensor":
     """Lecture audio via ffmpeg subprocess — contourne torchaudio/torchcodec.
 
     Entrée : audio_path — chemin vers le fichier audio/vidéo, sampling_rate — int (Hz)
@@ -107,12 +117,12 @@ def _read_audio_ffmpeg(audio_path: str, sampling_rate: int = 16000) -> "torch.Te
     return torch.from_numpy(audio)
 
 
-def load_vad():
+def charger_vad():
     """Charge Silero-VAD une seule fois."""
     global _vad_model, _vad_utils
     if _vad_model is None:
         try:
-            print("  Chargement Silero-VAD...")
+            log.info("Chargement Silero-VAD...")
             _vad_model, utils = torch.hub.load(
                 repo_or_dir="snakers4/silero-vad",
                 model="silero_vad",
@@ -121,18 +131,18 @@ def load_vad():
             )
             _vad_utils = {
                 "get_speech_timestamps": utils[0],
-                "read_audio": _read_audio_ffmpeg,  # bypass torchaudio/torchcodec
+                "read_audio": _lire_audio_ffmpeg,  # bypass torchaudio/torchcodec
             }
-            print("  Silero-VAD chargé")
+            log.info("Silero-VAD chargé")
         except Exception as e:
-            print(f"ATTENTION : Erreur chargement VAD : {e}")
+            log.warning("Erreur chargement VAD : %s", e)
             return None, None
     return _vad_model, _vad_utils
 
 
 # ── VAD ──────────────────────────────────────────────────────────────────────
 
-def detect_voice_activity(audio_path: str, log,
+def detecter_parole(audio_path: str, log,
                           threshold: float = 0.35,
                           min_speech_ms: int = 200,
                           min_silence_ms: int = 200) -> dict:
@@ -141,14 +151,14 @@ def detect_voice_activity(audio_path: str, log,
     Entrée : audio_path — chemin vers le fichier, log — logger,
              threshold — seuil de détection VAD (0–1),
              min_speech_ms / min_silence_ms — durées minimales en ms
-    Sortie : dict {"has_speech": bool, "speech_duration": float (secondes)}
+    Sortie : dict {"parole_presente": bool, "parole_duree": float (secondes)}
     """
-    result = {"has_speech": False, "speech_duration": 0.0}
+    result = {"parole_presente": False, "parole_duree": 0.0}
 
-    model, utils = load_vad()
+    model, utils = charger_vad()
     if model is None or utils is None:
         # VAD indisponible → on suppose parole présente pour ne pas bloquer
-        result["has_speech"] = True
+        result["parole_presente"] = True
         return result
 
     try:
@@ -167,20 +177,20 @@ def detect_voice_activity(audio_path: str, log,
 
         if speech_timestamps:
             total_speech = sum(ts["end"] - ts["start"] for ts in speech_timestamps)
-            result["speech_duration"] = round(total_speech, 2)
-            result["has_speech"] = True
+            result["parole_duree"] = round(total_speech, 2)
+            result["parole_presente"] = True
 
     except Exception as e:
         log.warning(f"Erreur VAD : {e}")
         # Fallback optimiste
-        result["has_speech"] = True
+        result["parole_presente"] = True
 
     return result
 
 
 # ── Transcription Whisper ────────────────────────────────────────────────────
 
-def transcribe(audio_path: str, model_name: str, log,
+def transcrire(audio_path: str, model_name: str, log,
                language: str = None, prompt: str = "") -> dict:
     """Transcrit l'audio via Whisper.
 
@@ -189,7 +199,7 @@ def transcribe(audio_path: str, model_name: str, log,
              prompt — texte de conditionnement initial
     Sortie : dict {"text": str, "language": str, "segments": list, "confidence": float|None}
     """
-    model = load_whisper(model_name)
+    model = charger_whisper(model_name)
     result = {"text": "", "language": None, "segments": [], "confidence": None}
 
     try:
@@ -200,8 +210,12 @@ def transcribe(audio_path: str, model_name: str, log,
             fp16=torch.cuda.is_available(),
             verbose=False,
             initial_prompt=prompt,
+            # Sous 0.2 de no_speech_prob on considère qu'il y a de la parole : seuil
+            # bas (défaut Whisper 0.6) car le pré-VAD Silero a déjà écarté le silence.
             no_speech_threshold=0.2,
+            # Seuil log-probabilité min : rejette les segments où Whisper a peu de confiance
             logprob_threshold=-0.5,
+            # Au-dessus de 2.0 = ratio de compression suspect = signal d'hallucination (boucles, répétitions)
             compression_ratio_threshold=2.0,
         )
         result["text"] = transcription.get("text", "").strip()
@@ -213,16 +227,25 @@ def transcribe(audio_path: str, model_name: str, log,
         if logprobs:
             result["confidence"] = round(math.exp(sum(logprobs) / len(logprobs)), 4)
 
-    except Exception as e:
-        log.warning(f"Erreur Whisper sur {audio_path} : {e}")
+    except (RuntimeError, OSError) as e:
+        # OOM GPU = fatal pour ce message, on log en erreur pour ne pas masquer le trou dans le corpus.
+        if "out of memory" in str(e).lower():
+            log.error(f"GPU OOM Whisper sur {audio_path} : {e}")
+        else:
+            log.warning(f"Erreur Whisper (runtime/IO) sur {audio_path} : {e}")
 
     return result
 
 
 # ── Nettoyage segments ───────────────────────────────────────────────────────
 
-def clean_segments(segments: list) -> list:
-    """Nettoie les segments Whisper pour inclusion directe dans le JSONL."""
+def nettoyer_segments(segments: list) -> list:
+    """Normalise les segments Whisper (champs utiles uniquement).
+
+    Sert à générer le SRT et à construire la chaîne `dialogue`. Les segments
+    ne sont PAS persistés dans le JSONL (cf. docstring module) ; `avg_logprob`
+    et `no_speech_prob` sont conservés ici seulement pour le run courant.
+    """
     clean = []
     for s in segments:
         clean.append({
@@ -238,7 +261,7 @@ def clean_segments(segments: list) -> list:
 
 # ── SRT ──────────────────────────────────────────────────────────────────────
 
-def generate_srt(segments: list, output_path: str) -> bool:
+def generer_srt(segments: list, output_path: str) -> bool:
     """Génère un fichier SRT à partir des segments nettoyés."""
     if not segments:
         return False
@@ -262,7 +285,7 @@ def generate_srt(segments: list, output_path: str) -> bool:
 
 # ── Filtre post-transcription ────────────────────────────────────────────────
 
-def filter_segments(segments: list,
+def filtrer_segments(segments: list,
                     max_non_cyr_ratio: float = 0.4,
                     max_consecutive_latin: int = 4) -> list:
     """Filtre les segments individuels contenant des artefacts.
@@ -294,7 +317,7 @@ def filter_segments(segments: list,
     return filtered
 
 
-def is_valid_transcription(confidence: float | None,
+def est_transcription_valide(confidence: float | None,
                            min_confidence: float = 0.35) -> bool:
     """Rejette si la confidence globale est trop basse."""
     if confidence is not None and confidence < min_confidence:
@@ -306,7 +329,7 @@ def is_valid_transcription(confidence: float | None,
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = build_base_parser(
+    parser = creer_parser_base(
         "Transcription audio batch (Whisper + Silero-VAD)",
         has_media_dir=True,
     )
@@ -320,7 +343,7 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    log = setup_logging("whisper", cfg=cfg)
+    log = init_logger("whisper", cfg=cfg)
     save_every = 50
 
     # Defaults depuis config, CLI override
@@ -348,165 +371,157 @@ def main():
 
     # ── Filtrer les messages éligibles ──
     # Seuls media_type="video" + has_audio=true, et pas déjà traités
-    ids_filter = set(args.ids) if args.ids else None
-    eligible = filter_eligible(
+    filtre_ids = set(args.ids) if args.ids else None
+    eligibles = filtrer_eligibles(
         messages,
-        ids_filter=ids_filter,
+        filtre_ids=filtre_ids,
         media_types=["video"],
-        check_fields=["dialogue"],
+        champs_a_verifier=["dialogue"],
         overwrite=args.overwrite,
         limit=None,  # appliqué après le filtre has_audio
         start_date=args.start_date,
         end_date=args.end_date,
     )
 
-    # Filtre supplémentaire : has_audio
-    eligible = [i for i in eligible if messages[i].get("has_audio")]
+    # Filtre supplémentaire : audio_present
+    eligibles = [i for i in eligibles if messages[i].get("audio_present")]
 
     if args.limit:
-        eligible = eligible[:args.limit]
+        eligibles = eligibles[:args.limit]
 
-    n_eligible = len(eligible)
-    log.info(f"Vidéos avec audio à transcrire : {n_eligible}")
+    n_eligibles = len(eligibles)
+    log.info(f"Vidéos avec audio à transcrire : {n_eligibles}")
 
-    if n_eligible == 0:
+    if n_eligibles == 0:
         log.info("Rien à faire.")
         if input_path != output_path:
             write_jsonl(messages, output_path)
         return
 
     # ── Chargement modèles (une seule fois) ──
-    load_vad()
-    load_whisper(model_name)
+    charger_vad()
+    charger_whisper(model_name)
 
-    tracker = ProgressTracker(n_eligible, label="whisper")
-    processed = 0
-    errors = 0
+    tracker = SuiviProgression(n_eligibles, label="whisper")
+    n_traites = 0
+    n_erreurs = 0
 
     try:
-        for rank, idx in enumerate(eligible):
+        for rank, idx in enumerate(eligibles):
             msg = messages[idx]
             mid = msg.get("message_id", "?")
-            channel = msg.get("channel", "robert_magyar")
-            media_path_rel = msg.get("media_path")
-            duration = msg.get("duration")  # ffprobe
+            channel = msg.get("canal", "robert_magyar")
+            media_chemin_rel = msg.get("media_chemin")
+            duration = msg.get("duree")  # ffprobe
 
-            if not media_path_rel:
+            if not media_chemin_rel:
                 continue
 
-            media_file = media_dir / media_path_rel
-            basename = os.path.basename(media_path_rel)
+            fichier_media = media_dir / media_chemin_rel
 
             # ── Fichier manquant ──
-            if not media_file.is_file():
-                log.warning(f"msg {mid}\t{media_path_rel}\tfichier manquant")
-                errors += 1
-                tracker.tick(rank, mid, "fichier manquant ✗")
+            if not fichier_media.is_file():
+                log.warning(f"msg {mid}\t{media_chemin_rel}\tfichier manquant")
+                n_erreurs += 1
+                tracker.avancer(rank, mid, "fichier manquant ✗")
                 continue
 
             # ── VAD ──
-            print(f"[{rank+1}/{n_eligible}] msg {mid} {basename} — VAD...", end="", flush=True)
-            vad = detect_voice_activity(str(media_file), log,
+            vad = detecter_parole(str(fichier_media), log,
                                         threshold=vad_threshold,
                                         min_speech_ms=min_speech_ms,
                                         min_silence_ms=min_silence_ms)
 
-            if not vad["has_speech"] and args.vad_gate:
-                new_fields = {
-                    "dialogue": "", "has_speech": False, "speech_language": None,
-                    "speech_confidence": None, "speech_duration": 0.0,
-                    "speech_ratio": 0.0, "whisper_segments": [],
-                    "srt_path": None,
+            if not vad["parole_presente"] and args.vad_gate:
+                nouveaux_champs = {
+                    "dialogue": "",
+                    "parole_present": False,
+                    "parole_duree": 0.0,
+                    "parole_ratio": 0.0,
                 }
-                msg.update(new_fields)
-                processed += 1
-                update_fiche(msg, new_fields, media_dir / "fiches", overwrite=args.overwrite)
-                tracker.tick(rank, mid, "pas de parole")
-                if processed % save_every == 0:
+                msg.update(nouveaux_champs)
+                n_traites += 1
+                mettre_a_jour_fiche(msg, nouveaux_champs, media_dir / "fiches", overwrite=args.overwrite)
+                tracker.avancer(rank, mid, "pas de parole")
+                if n_traites % save_every == 0:
                     write_jsonl(messages, output_path)
                 continue
 
             # ── Whisper ──
-            print(f"\r[{rank+1}/{n_eligible}] msg {mid} {basename} — Whisper...", end="", flush=True)
-            whisper_result = transcribe(str(media_file), model_name, log,
+            whisper_result = transcrire(str(fichier_media), model_name, log,
                                         language=language, prompt=whisper_prompt)
 
-            speech_dur = vad["speech_duration"]
-            speech_ratio = round(speech_dur / duration, 3) if duration and duration > 0 else 0.0
+            parole_dur = vad["parole_duree"]
+            parole_ratio = round(parole_dur / duration, 3) if duration and duration > 0 else 0.0
 
             if not whisper_result["text"]:
-                new_fields = {
-                    "dialogue": "", "has_speech": False,
-                    "speech_language": whisper_result["language"],
-                    "speech_confidence": None, "speech_duration": speech_dur,
-                    "speech_ratio": speech_ratio, "whisper_segments": [],
-                    "srt_path": None,
+                nouveaux_champs = {
+                    "dialogue": "",
+                    "parole_present": False,
+                    "parole_duree": parole_dur,
+                    "parole_ratio": parole_ratio,
                 }
-                msg.update(new_fields)
-                processed += 1
-                update_fiche(msg, new_fields, media_dir / "fiches", overwrite=args.overwrite)
-                tracker.tick(rank, mid, "transcription vide")
-                if processed % save_every == 0:
+                msg.update(nouveaux_champs)
+                n_traites += 1
+                mettre_a_jour_fiche(msg, nouveaux_champs, media_dir / "fiches", overwrite=args.overwrite)
+                tracker.avancer(rank, mid, "transcription vide")
+                if n_traites % save_every == 0:
                     write_jsonl(messages, output_path)
                 continue
 
             # ── Filtre qualité post-transcription ──
-            cleaned = clean_segments(whisper_result["segments"])
+            cleaned = nettoyer_segments(whisper_result["segments"])
 
             # 1. Rejet global si confidence trop basse
-            if not is_valid_transcription(whisper_result["confidence"]):
+            if not est_transcription_valide(whisper_result["confidence"]):
                 cleaned = []
             else:
                 # 2. Filtrage par segment (artefacts latins, ratio non-cyrillique)
-                cleaned = filter_segments(cleaned)
+                cleaned = filtrer_segments(cleaned)
 
             if not cleaned:
-                new_fields = {
-                    "dialogue": "", "has_speech": False,
-                    "speech_language": whisper_result["language"],
-                    "speech_confidence": whisper_result["confidence"],
-                    "speech_duration": speech_dur,
-                    "speech_ratio": speech_ratio, "whisper_segments": [],
-                    "srt_path": None,
+                nouveaux_champs = {
+                    "dialogue": "",
+                    "parole_present": False,
+                    "parole_duree": parole_dur,
+                    "parole_ratio": parole_ratio,
                 }
-                msg.update(new_fields)
-                processed += 1
-                update_fiche(msg, new_fields, media_dir / "fiches", overwrite=args.overwrite)
+                msg.update(nouveaux_champs)
+                n_traites += 1
+                mettre_a_jour_fiche(msg, nouveaux_champs, media_dir / "fiches", overwrite=args.overwrite)
                 conf = f"{whisper_result['confidence']:.2f}" if whisper_result["confidence"] else "?"
-                tracker.tick(rank, mid, f"rejeté (conf={conf})")
-                if processed % save_every == 0:
+                tracker.avancer(rank, mid, f"rejeté (conf={conf})")
+                if n_traites % save_every == 0:
                     write_jsonl(messages, output_path)
                 continue
 
             # ── Résultats ──
             dialogue = " ".join(s["text"] for s in cleaned if s.get("text"))
 
-            # SRT (dans le même dossier que le média)
+            # SRT (dans le même dossier que le média) — chemin déductible :
+            # {fiches_dir}/{canal}_{message_id}.srt
             srt_filename = f"{channel}_{mid}.srt"
-            media_folder = media_file.parent
-            generate_srt(cleaned, str(media_folder / srt_filename))
-            media_rel_dir = str(Path(media_path_rel).parent)
+            media_folder = fichier_media.parent
+            generer_srt(cleaned, str(media_folder / srt_filename))
 
-            new_fields = {
-                "dialogue": dialogue, "has_speech": True,
-                "speech_language": whisper_result["language"],
-                "speech_confidence": whisper_result["confidence"],
-                "speech_duration": speech_dur, "speech_ratio": speech_ratio,
-                "whisper_segments": cleaned,
-                "srt_path": f"{media_rel_dir}/{srt_filename}",
+            nouveaux_champs = {
+                "dialogue": dialogue,
+                "parole_present": True,
+                "parole_duree": parole_dur,
+                "parole_ratio": parole_ratio,
             }
-            msg.update(new_fields)
-            processed += 1
-            update_fiche(msg, new_fields, media_dir / "fiches", overwrite=args.overwrite)
+            msg.update(nouveaux_champs)
+            n_traites += 1
+            mettre_a_jour_fiche(msg, nouveaux_champs, media_dir / "fiches", overwrite=args.overwrite)
 
             lang = whisper_result["language"] or "?"
             conf = f"{whisper_result['confidence']:.2f}" if whisper_result["confidence"] else "?"
             n_seg = len(cleaned)
             n_raw = len(whisper_result["segments"])
             dropped = f", -{n_raw - n_seg} filtrés" if n_seg < n_raw else ""
-            tracker.tick(rank, mid, f"{lang}, {n_seg} seg{dropped}, conf={conf}")
+            tracker.avancer(rank, mid, f"{lang}, {n_seg} seg{dropped}, conf={conf}")
 
-            if processed % save_every == 0:
+            if n_traites % save_every == 0:
                 write_jsonl(messages, output_path)
 
     except KeyboardInterrupt:
@@ -514,7 +529,7 @@ def main():
     finally:
         write_jsonl(messages, output_path)
 
-    tracker.summary(errors=errors, skipped=n_eligible - processed - errors)
+    tracker.resumer(errors=n_erreurs, skipped=n_eligibles - n_traites - n_erreurs)
 
 
 if __name__ == "__main__":
