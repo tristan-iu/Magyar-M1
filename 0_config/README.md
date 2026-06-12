@@ -41,7 +41,6 @@ from utils import (
 |---|---|
 | `config.example.yaml` | Template de configuration (chemins, phases, modèles, seuils). À copier en `config.yaml`. |
 | `utils.py` | Bibliothèque partagée — API ci-dessous. |
-| `hallucination_patterns.yaml` | Patterns regex d'hallucination Whisper, lus par `2b_transcription/qa_whisper.py`. |
 
 ### API `utils.py`
 

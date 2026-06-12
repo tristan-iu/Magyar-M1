@@ -3,7 +3,7 @@
 Collecte messages et médias depuis un canal Telegram. Produit un fichier JSONL
 enrichi des métadonnées fournies par la plateforme (vues, réactions, transferts)
 et de deux empreintes de hachage (MD5 exact + pHash perceptuel) pour repérer les
-doublons. Trois modes : `scrape`, `retry`, `--inject`.
+doublons.
 
 ## Installation
 
@@ -15,32 +15,21 @@ Pour pouvoir utiliser l'API de Telegram, créez un fichier `.env` en suivant le 
 
 ## Utilisation
 
-**Mode scrape** — collecte dans une plage de dates, une seule chaîne Telegram à la fois :
-
 ```bash
+# Scrape : collecte une plage de dates sur un canal
 python telegram_scraper.py @chaine 2024-01-01 2024-12-31 ./output
-python telegram_scraper.py @chaine 2024-01-01 2024-12-31 ./output --limit 100
-python telegram_scraper.py @chaine 2024-01-01 2024-12-31 ./output --no-media
-python telegram_scraper.py @chaine 2024-01-01 2024-12-31 ./output --delay 2.0
-```
+#   --limit 100    s'arrête après 100 messages
+#   --no-media     métadonnées seules, aucun téléchargement
+#   --delay 2.0    pause (secondes) entre messages
 
-**Mode retry** — retélécharge les médias manquants sans rescraper :
-
-```bash
+# Retry : retélécharge les médias manquants, sans rescraper
 python telegram_scraper.py @chaine 2024-01-01 2024-12-31 ./output --retry
-```
 
-**Mode inject** — intègre de nouveaux messages scrapés dans un JSONL enrichi existant, sans connexion Telegram. Idempotent (seuls les `message_id` absents sont ajoutés) :
-
-```bash
-# Chemins depuis config.yaml (paths.raw_path et paths.jsonl_clean)
+# Inject : intègre les nouveaux messages scrapés dans un JSONL enrichi existant,
+# sans connexion Telegram. Idempotent (seuls les message_id absents sont ajoutés).
 python telegram_scraper.py --inject
-
-# Chemins explicites
-python telegram_scraper.py --inject --raw ./messages.jsonl --target ./messages_enriched.jsonl
-
-# Prévisualiser sans modifier
-python telegram_scraper.py --inject --dry-run
+#   --raw / --target   chemins explicites (défaut : paths.raw_path et paths.jsonl_clean de config.yaml)
+#   --dry-run          prévisualise sans modifier
 ```
 
 ## Output 
@@ -56,11 +45,6 @@ output/
 ```
 
 ## Champs constituant le jsonl en output
-
-Schéma propre francisé (post-migration avril 2026). Le scraper écrit aussi
-`duree`, `largeur`, `hauteur` quand l'API Telegram les fournit (disponibles avant
-téléchargement) — l'étape E1 ffprobe les recalcule ensuite sur le fichier réel et
-ajoute les autres champs techniques (`audio_present`, `fps`, etc.).
 
 ```json
 {

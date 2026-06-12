@@ -11,8 +11,8 @@ méthodologique. Les limites connues :
 - **Pas de ground truth WER/CER.** Une validation rigoureuse demanderait
   30-50 segments corrigés à la main par un·e locuteur·trice natif·ve
   (stratifiés P1/P2/P3 et par niveau de confiance). Le scoring de
-  `qa_whisper.py` est une QA *intrinsèque* (confiance estimée sans
-  re-transcription), pas une mesure d'erreur réelle.
+  le scoring `dialogue_confiance` est une QA *intrinsèque* (confiance estimée
+  sans re-transcription), pas une mesure d'erreur réelle.
 - **Musique de fond.** Whisper ne distingue pas dialogue parlé et musique
   chantée. Les compilations P3 (forte musique de fond) produisent des
   `dialogue` souvent corrompus ou hallucinatoires. `audio_segmentation.py`
@@ -69,7 +69,7 @@ conditionnement et les seuils VAD sont lus depuis `0_config/config.yaml`
 | `parole_duree` | float | Durée de parole en secondes |
 | `parole_ratio` | float | Ratio parole / durée totale |
 | `dialogue` | string \| null | Texte transcrit. `""` si la transcription est vide ou rejetée par le filtre qualité ; `null` si le message n'a jamais été transcrit (pas d'audio) |
-| `dialogue_confiance` | float | Score QA [0, 1] produit par `qa_whisper.py` (1 = très fiable) |
+| `dialogue_confiance` | float | Score QA composite [0, 1] (1 = très fiable) — voir section QA ci-dessous |
 | `alerte_no_dialogue` | bool | Pas de dialogue exploitable |
 | `alerte_hallucination_phrase` | bool | Outro YouTube ukr/ru détecté |
 | `alerte_repeated_ngram` | bool | Trigramme dominant > 25 % du texte |
@@ -78,55 +78,36 @@ conditionnement et les seuils VAD sont lus depuis `0_config/config.yaml`
 | `alerte_low_conf` | bool | Proportion `logprob < -1` trop haute |
 | `alerte_high_no_speech` | bool | Proportion `no_speech_prob > 0.6` trop haute |
 
-`whisper_batch.py` produit les quatre premiers champs ; `dialogue_confiance`, les
-7 `alerte_*` et `qa_patterns_version` (version du YAML de patterns, pour traçabilité)
-sont produits par `qa_whisper.py` (section suivante).
+`whisper_batch.py` produit les quatre premiers champs ; `dialogue_confiance` et les
+7 `alerte_*` proviennent d'une passe de QA interne (section suivante).
 
 Les fichiers SRT sont écrits dans le dossier `fiches/` aux côtés des médias
 (chemin déductible : `fiches/{canal}_{message_id}.srt`, pas de champ JSONL).
 Les segments Whisper bruts ne sont plus persistés dans le JSONL (16 MB économisés) —
 ils sont disponibles dans le SRT si besoin.
 
-## qa_whisper.py — scoring de qualité sans re-transcription
+## QA des transcriptions — `dialogue_confiance` et alertes
 
-```bash
-# Enrichit le JSONL + produit un CSV synthèse pour tri manuel
-python qa_whisper.py --input  messages_clean.jsonl \
-                     --output messages_clean.jsonl \
-                     --csv    output/qa_whisper.csv
+Les champs `dialogue_confiance` et `alerte_*` ont été produits par une passe de
+QA interne (script non publié). Le score combine la médiane des `avg_logprob`
+Whisper, la proportion de segments basse confiance, la détection de patterns
+d'hallucination connus (« Дякую за перегляд », outros YouTube…), le
+`compression_ratio` et le débit tokens/seconde.
 
-# Filtrer les suspects en R / pandas :
-#   df_clean = df[df["dialogue_confiance"] >= 0.5]
-#   df_suspect = df[df["dialogue_confiance"] < 0.5]
+Usage typique pour filtrer les transcriptions suspectes en R / pandas :
+
+```python
+df_fiable  = df[df["dialogue_confiance"] >= 0.5]
+df_suspect = df[df["dialogue_confiance"] < 0.5]
 ```
 
-Le score combine la médiane des `avg_logprob` Whisper, la proportion de
-segments basse confiance, la détection de patterns d'hallucination connus
-(« Дякую за перегляд », outros YouTube…), le `compression_ratio` et le
-débit tokens/seconde. Seuils documentés en tête du script.
-
-### ⚠️ Les `dialogue_confiance` ne sont pas recalculables tels quels
-
-Le signal `avg_logprob` / `no_speech_prob` provient des **segments Whisper**,
-que `whisper_batch.py` ne persiste **plus** dans le JSONL (strippés pour
-économiser ~16 MB ; ils restent dans les SRT). Les `dialogue_confiance`
-présents dans le corpus ont été calculés lors d'un **run historique** où ces
-segments existaient encore : ils sont **valides** mais **non reproductibles**
-depuis le seul JSONL canonique.
-
-Pour éviter qu'un rerun n'écrase ces scores valides par du bruit,
-`qa_whisper.py` **refuse de tourner** (exit 1, rien écrit) si les messages
-éligibles n'ont pas de `whisper_segments` :
-
-```
-Aucun message éligible n'a de `whisper_segments` : score fiable impossible (…)
-```
-
-Recalculer proprement supposerait de **refaire tourner Whisper** sur tout le
-corpus (plusieurs heures GPU). En attendant, on peut forcer un scoring
-**dégradé texte-seul** (`logprob` ignoré, score plafonné à 0.3, alertes
-`low_conf`/`high_no_speech` désactivées) avec `--allow-degraded` — à n'utiliser
-qu'en connaissance de cause, jamais sur le canonique de production.
+**⚠️ Ces scores ne sont pas recalculables depuis le seul JSONL** : le signal
+`avg_logprob` / `no_speech_prob` provient des **segments Whisper**, que
+`whisper_batch.py` ne persiste **plus** dans le JSONL (strippés pour économiser
+~16 MB ; ils restent dans les SRT). Les `dialogue_confiance` du corpus ont été
+calculés lors d'un run historique où ces segments existaient encore : ils sont
+valides, mais les recalculer supposerait de refaire tourner Whisper sur tout le
+corpus (plusieurs heures GPU).
 
 ## audio_segmentation.py — parole / musique / silence (optionnel)
 

@@ -5,8 +5,8 @@ Enrichit le JSONL avec : dialogue, parole_present, parole_duree, parole_ratio.
 Le SRT est écrit à côté du média (chemin déductible : channel_mid.srt).
 Les segments bruts ne sont plus persistés (ils gonflaient le JSONL de ~16 MB) :
 conséquence — les `avg_logprob`/`no_speech_prob` calculés ici ne sont disponibles
-qu'au moment du run. C'est pourquoi `qa_whisper.py` ne peut pas recalculer
-`dialogue_confiance` a posteriori sans re-transcrire (cf. son garde-fou).
+qu'au moment du run, et `dialogue_confiance` (score QA composite dérivé de ces
+signaux) n'est pas recalculable a posteriori sans re-transcrire.
 
 Pipeline par message :
   1. VAD (Silero) — détecte la présence/durée de parole

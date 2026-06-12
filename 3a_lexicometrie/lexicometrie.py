@@ -237,7 +237,7 @@ def traiter_messages(messages, phases, nlp, stopwords, exclude_pos,
         period = etiquette_periode(dt, temporal_bin)
 
         # On exclut le dialogue si la confiance composite QA est insuffisante.
-        # `dialogue_confiance` (post-`qa_whisper.py`) remplace l'ancien `speech_confidence`
+        # `dialogue_confiance` (score QA composite) remplace l'ancien `speech_confidence`
         # — score 0-1 mais avec pénalités de qualité (hallucination, répétition, logprob).
         caption_text  = (msg.get("legende")    or "").strip()
         conf          = msg.get("dialogue_confiance", 0) or 0

@@ -1,9 +1,11 @@
 # Dépôt M1 SDHC 
 Ensemble du code utilisé dans le cadre du mémoire de M1 SDHC. 
 
-Le corpus porte sur les publications de la chaîne Telegram du commandant de drones ukrainien Robert « *Madyar* » Brovdi ([@robert_magyar](https://t.me/robert_magyar)), de septembre 2022 à septembre 2025 — 1365 messages couvrant trois phases de production (artisanale, semi-professionnelle, institutionnelle). Le corpus n'est pas inclus dans le dépôt (**disponible sur demande**) ; la chaîne est publique et la collecte reproductible. Le scraper fonctionne sur n'importe quelle chaîne Telegram ; les analyses en aval, développées pour ce corpus en particulier, ne sont pas garanties ailleurs.
+Le corpus porte sur les publications de la chaîne Telegram du commandant de drones ukrainien Robert « *Madyar* » Brovdi ([@robert_magyar](https://t.me/robert_magyar)), de septembre 2022 à septembre 2025 — 1365 messages couvrant trois phases de production (artisanale, semi-professionnelle, institutionnelle). Le corpus n'est pas inclus dans le dépôt ; la chaîne est publique et la collecte reproductible.
 
 ## Structure du dépôt
+
+La numérotation correspond à l'ordre d'exécution : (1) collecte, (2) enrichissement, (3) analyse. Le scraper produit un JSONL de base ; les étapes suivantes enrichissent incrémentalement ce fichier avec de nouveaux champs.
 
 ```
 ├── 0_config/            Configuration centrale (config.yaml, utils.py)
@@ -20,21 +22,11 @@ Le corpus porte sur les publications de la chaîne Telegram du commandant de dro
 │   └── blasons/               Détection logos de brigade via SIFT & RANSAC
 ├── 3a_lexicometrie/     Analyse textuelle (lemmatisation spaCy, TF-IDF, spécificités, LDA, AFC, CAH)
 ├── 3b_stats_R/          Analyses quantitatives et figures du mémoire (R + ggplot2)
-├── 3c_reseaux/          Réseaux lexicaux de cooccurrences PMI (igraph, exports Gephi)
-└── 3d_couleurs/         Analyse colorimétrique HSV des keyframes (entropie, PCA, similarité)
-```
-
-La numérotation correspond à l'ordre d'exécution : (1) collecte, (2) enrichissement, (3) analyse. Le scraper produit un JSONL de base ; les étapes suivantes enrichissent incrémentalement ce fichier avec de nouveaux champs.
-
-## Configuration
-
-Copier le template et adapter les chemins locaux (`paths.*`). `0_config/config.example.yaml` documente la structure complète.
-
-```bash
-cp 0_config/config.example.yaml 0_config/config.yaml
+└── 3c_couleurs/         Analyse colorimétrique HSV des keyframes (entropie, PCA, similarité)
 ```
 
 ## Utilisation
+Copier le template et adapter les chemins locaux (`paths.*`). `0_config/config.example.yaml` documente la structure complète.
 
 Se référer au README de chaque module. Tous les scripts sont paramétrables via CLI, du type :
 ```bash
@@ -51,7 +43,7 @@ python3 -m spacy download uk_core_news_trf  # modèle spaCy ukrainien
 sudo apt install ffmpeg                 # dépendance système
 ```
 
-Un GPU CUDA est recommandé pour Whisper, EasyOCR et InsightFace. Le pipeline a été développé et testé sur une RTX 3080 (CUDA 12.8).
+Un GPU CUDA est recommandé pour Whisper, EasyOCR et InsightFace.
 
 Les modules qui nécessitent une clé API (scraper Telegram, traduction DeepL) lisent leurs credentials depuis un fichier `.env`. Un `.env.example` est fourni dans chaque module concerné.
 

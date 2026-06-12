@@ -12,11 +12,6 @@ torchaudio
 # ~/.cache/torch/hub). Nécessite donc juste torch + un accès réseau à GitHub la
 # première fois. Le paquet `silero-vad` n'est jamais importé par le code.
 
-# ── QA transcription (qa_whisper.py) ────────────────────────────────────────
-# Pas de dépendance externe : lecture JSONL + heuristiques sur les segments.
-# Les patterns d'hallucination sont chargés depuis un YAML via PyYAML (déjà
-# tiré par le venv principal au travers de 0_config/utils.py).
-
 # ── Audio segmentation (audio_segmentation.py — venv SÉPARÉ !) ──────────────
 # inaSpeechSegmenter (licence CC-BY-NC) + TensorFlow 2.16+ doivent être
 # installés dans un venv_ina/ dédié : conflit cuDNN avec torch sur le même venv.
