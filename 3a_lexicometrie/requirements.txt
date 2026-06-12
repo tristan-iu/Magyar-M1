@@ -1,0 +1,26 @@
+# lexicometrie.py — lemmatisation + TF-IDF + volcano
+pandas
+scipy
+spacy            # + modèle : python -m spacy download uk_core_news_trf
+scikit-learn
+statsmodels
+
+# lda_topics.py — topic modeling
+gensim
+
+# afc.py — analyse factorielle des correspondances
+prince
+
+# cooccurrences.py — réseaux de cooccurrences
+networkx
+
+# plot_lexico.py / figures (36*, ner_lieux, collocations…)
+matplotlib
+numpy
+
+# evaluate_lemmas.py, cah.py, kwic.py, comparaison_sources.py,
+# specificites.py (scipy.stats.hypergeom — spécificités de Lafon)
+# (pandas / scikit-learn / scipy / matplotlib / numpy déjà listés)
+
+# pyyaml : requis par 0_config/utils.py (load_config)
+pyyaml>=6.0
