@@ -24,11 +24,11 @@ References :
 Champs JSONL produits :
   - blason_present  (bool) — blason trouve dans au moins 1 keyframe
   - blason_detecte  (str)  — categorie dominante (ex: "414_obr"), null sinon
-  - blason_roi      (str)  — ROI dominante (ex: "epaule"), null sinon
+  - blason_zone     (str)  — ROI dominante (ex: "haut_droite"), null sinon
 
 CSV per-frame (1 ligne = 1 keyframe) :
   message_id, keyframe, frame_position,
-  blason_present, n_inliers, blason_detecte, blason_roi
+  blason_present, n_inliers, blason_detecte, blason_zone
 
 Options CLI : --match-threshold, --ratio, --roi-pct, --limit, --ids, --overwrite
 
@@ -53,13 +53,13 @@ from tqdm import tqdm
 _UTILS_DIR = Path(__file__).resolve().parents[2] / "0_config"
 sys.path.insert(0, str(_UTILS_DIR))
 from utils import (  # noqa: E402
-    build_base_parser,
+    creer_parser_base,
     load_config,
-    setup_logging,
+    init_logger,
     read_jsonl,
     write_jsonl,
-    update_fiche,
-    filter_eligible,
+    mettre_a_jour_fiche,
+    filtrer_eligibles,
     fmt_eta,
 )
 
@@ -68,7 +68,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # Noms de colonnes du CSV de sortie
 CSV_FIELDNAMES = [
     "message_id", "keyframe", "frame_position",
-    "blason_present", "n_inliers", "blason_detecte", "blason_roi",
+    "blason_present", "n_inliers", "blason_detecte", "blason_zone",
 ]
 
 # Extensions images acceptees
@@ -101,7 +101,7 @@ def parse_frame_index(filename: str) -> int:
     return int(m.group(1)) if m else 1
 
 
-def extract_roi(img: np.ndarray, roi_pcts: tuple) -> np.ndarray:
+def extraire_roi(img: np.ndarray, roi_pcts: tuple) -> np.ndarray:
     """Decoupe une region d'interet d'apres des pourcentages (x0, y0, x1, y1)."""
     h, w = img.shape[:2]
     _, x0_pct, y0_pct, x1_pct, y1_pct = roi_pcts
@@ -110,7 +110,7 @@ def extract_roi(img: np.ndarray, roi_pcts: tuple) -> np.ndarray:
     return img[y0:y1, x0:x1]
 
 
-def load_references(refs_dir: Path, log) -> list[dict]:
+def charger_references(refs_dir: Path, log) -> list[dict]:
     """Charge les images de reference et calcule les descripteurs SIFT.
 
     Scanne les sous-dossiers de refs_dir : chaque sous-dossier est une
@@ -169,7 +169,7 @@ def load_references(refs_dir: Path, log) -> list[dict]:
     return refs
 
 
-def match_roi_against_refs(
+def matcher_roi_contre_refs(
     roi_img: np.ndarray,
     refs: list[dict],
     sift: cv2.SIFT,
@@ -229,7 +229,7 @@ def match_roi_against_refs(
     return best_inliers, best_cat
 
 
-def load_existing_csv_messages(csv_path: Path) -> set[int]:
+def charger_msgs_termines(csv_path: Path) -> set[int]:
     """Charge les message_id deja presents dans le CSV (idempotence)."""
     done = set()
     if not csv_path.is_file():
@@ -242,8 +242,8 @@ def load_existing_csv_messages(csv_path: Path) -> set[int]:
 
 
 def main():
-    parser = build_base_parser(
-        "Detection des blasons de brigade (ORB feature matching)",
+    parser = creer_parser_base(
+        "Detection des blasons de brigade (SIFT + RANSAC)",
         has_input=False, has_output=False,
     )
     parser.add_argument("--input", default=None,
@@ -273,7 +273,7 @@ def main():
 
     # Config
     cfg = load_config(args.config) if args.config else load_config()
-    log = setup_logging("blasons", cfg=cfg)
+    log = init_logger("blasons", cfg=cfg)
 
     corpus_base = Path(cfg["paths"]["corpus_base"])
     keyframes_dir = Path(cfg["paths"]["keyframes_dir"])
@@ -282,7 +282,7 @@ def main():
 
     # Chemins I/O
     input_path = (Path(args.input) if args.input
-                  else corpus_base / cfg["paths"]["jsonl_faces"])
+                  else corpus_base / cfg["paths"]["jsonl_clean"])
     output_path = (Path(args.output) if args.output
                    else corpus_base / "messages_blasons.jsonl")
     csv_path = Path(args.csv)
@@ -318,8 +318,8 @@ def main():
         sys.exit(1)
 
     # Charger references
-    log.info("Chargement des references ORB...")
-    refs = load_references(refs_dir, log)
+    log.info("Chargement des references SIFT...")
+    refs = charger_references(refs_dir, log)
     if not refs:
         log.error("Aucune reference utilisable. Ajoutez des crops dans le dossier.")
         sys.exit(1)
@@ -333,32 +333,35 @@ def main():
     log.info(f"Corpus : {len(messages)} messages")
 
     # Filtrer messages avec keyframes ou photos
-    ids_filter = set(args.ids) if args.ids else None
-    eligible_indices = filter_eligible(
+    filtre_ids = set(args.ids) if args.ids else None
+    indices_eligibles = filtrer_eligibles(
         messages,
-        ids_filter=ids_filter,
-        check_fields=["blason_present"],
+        filtre_ids=filtre_ids,
+        champs_a_verifier=["blason_present"],
         overwrite=args.overwrite,
         start_date=args.start_date,
         end_date=args.end_date,
     )
-    eligible_indices = [
-        i for i in eligible_indices
-        if (messages[i].get("keyframes_count") or 0) > 0
+    # Pour les vidéos, on glob les keyframes dans la boucle (le champ
+    # keyframes_count a disparu du schéma canonique) ; pour les photos, on
+    # exige un media_chemin. Même logique que detect_magyar.py.
+    indices_eligibles = [
+        i for i in indices_eligibles
+        if messages[i].get("media_type") == "video"
         or (messages[i].get("media_type") == "photo"
-            and messages[i].get("media_path"))
+            and messages[i].get("media_chemin"))
     ]
 
     if args.limit:
-        eligible_indices = eligible_indices[:args.limit]
+        indices_eligibles = indices_eligibles[:args.limit]
 
-    n_eligible = len(eligible_indices)
-    log.info(f"Messages eligibles : {n_eligible}")
+    n_eligibles = len(indices_eligibles)
+    log.info(f"Messages eligibles : {n_eligibles}")
     log.info(f"Seuil matches : {args.match_threshold} | "
              f"Ratio Lowe : {args.ratio} | "
              f"ROIs : {[r[0] for r in active_rois]}")
 
-    if n_eligible == 0:
+    if n_eligibles == 0:
         log.info("Rien a faire.")
         if input_path != output_path:
             write_jsonl(messages, output_path)
@@ -366,26 +369,26 @@ def main():
 
     # CSV : idempotence
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    done_msgs = load_existing_csv_messages(csv_path) if not args.overwrite else set()
-    log.info(f"Messages deja dans le CSV : {len(done_msgs)}")
+    msgs_termines = charger_msgs_termines(csv_path) if not args.overwrite else set()
+    log.info(f"Messages deja dans le CSV : {len(msgs_termines)}")
 
     csv_mode = "w" if args.overwrite else "a"
     csv_file = open(csv_path, csv_mode, newline="", encoding="utf-8")
     csv_writer = csv.DictWriter(csv_file, fieldnames=CSV_FIELDNAMES)
-    if args.overwrite or not done_msgs:
+    if args.overwrite or not msgs_termines:
         csv_writer.writeheader()
 
-    processed = 0
-    errors = 0
+    n_traites = 0
+    n_erreurs = 0
     total_detections = 0
     t0 = time.time()
 
     try:
-        for rank, idx in enumerate(tqdm(eligible_indices,
+        for rank, idx in enumerate(tqdm(indices_eligibles,
                                         desc="Blasons", unit="msg")):
             msg = messages[idx]
             mid = msg["message_id"]
-            channel = msg.get("channel", "robert_magyar")
+            channel = msg.get("canal", "robert_magyar")
             # Lister les keyframes (ou photo directe)
             kf_pattern = f"{channel}_{mid}_kf_"
             kf_files = sorted(
@@ -394,25 +397,25 @@ def main():
                 and p.suffix in (".jpg", ".png")
             )
 
-            is_photo = False
+            est_photo = False
             if not kf_files:
-                media_path = msg.get("media_path", "")
-                photo_file = corpus_base / media_path if media_path else None
-                if photo_file and photo_file.is_file():
-                    kf_files = [photo_file]
-                    is_photo = True
+                media_chemin = msg.get("media_chemin", "")
+                fichier_photo = corpus_base / media_chemin if media_chemin else None
+                if fichier_photo and fichier_photo.is_file():
+                    kf_files = [fichier_photo]
+                    est_photo = True
                 else:
                     log.warning(f"msg {mid} : aucune keyframe ni photo")
-                    errors += 1
+                    n_erreurs += 1
                     continue
 
             total_kf = len(kf_files)
-            frames_with_blason = 0
-            frame_results = []
+            frames_avec_blason = 0
+            resultats_frames = []
 
             for kf_idx, kf_path in enumerate(kf_files):
                 kf_name = kf_path.name
-                kf_num = 1 if is_photo else parse_frame_index(kf_name)
+                kf_num = 1 if est_photo else parse_frame_index(kf_name)
 
                 img = imread_safe(str(kf_path))
                 if img is None:
@@ -422,7 +425,7 @@ def main():
                 # Tester chaque ROI — pour les photos on scanne l'image entiere
                 # en plus des coins, car le blason peut etre n'importe ou
                 rois_a_tester = active_rois
-                if is_photo:
+                if est_photo:
                     rois_a_tester = active_rois + [
                         ("image_entiere", 0.0, 0.0, 1.0, 1.0)]
 
@@ -431,11 +434,11 @@ def main():
                 best_cat_name = ""
 
                 for roi_def in rois_a_tester:
-                    roi_img = extract_roi(img, roi_def)
+                    roi_img = extraire_roi(img, roi_def)
                     if roi_img.size == 0:
                         continue
 
-                    n_inliers, cat_name = match_roi_against_refs(
+                    n_inliers, cat_name = matcher_roi_contre_refs(
                         roi_img, refs, sift, bf, args.ratio)
 
                     if n_inliers > best_n_inliers:
@@ -446,28 +449,28 @@ def main():
                 # Seuil sur les inliers RANSAC (score de confiance)
                 detected = best_n_inliers >= args.match_threshold
                 if detected:
-                    frames_with_blason += 1
+                    frames_avec_blason += 1
 
                 if total_kf > 1:
                     frame_pos = round(kf_idx / (total_kf - 1), 4)
                 else:
                     frame_pos = 0.0
 
-                frame_results.append({
+                resultats_frames.append({
                     "kf_num": kf_num,
                     "frame_position": frame_pos,
                     "blason_present": detected,
                     "n_inliers": best_n_inliers,
                     "blason_detecte": best_cat_name,
-                    "blason_roi": best_roi_name,
+                    "blason_zone": best_roi_name,
                 })
 
-            if not frame_results:
+            if not resultats_frames:
                 continue
 
             # Ecrire CSV
-            if mid not in done_msgs:
-                for fr in frame_results:
+            if mid not in msgs_termines:
+                for fr in resultats_frames:
                     csv_writer.writerow({
                         "message_id": mid,
                         "keyframe": fr["kf_num"],
@@ -475,24 +478,24 @@ def main():
                         "blason_present": fr["blason_present"],
                         "n_inliers": fr["n_inliers"],
                         "blason_detecte": fr["blason_detecte"],
-                        "blason_roi": fr["blason_roi"],
+                        "blason_zone": fr["blason_zone"],
                     })
 
             # Agregation message
-            total_frames = len(frame_results)
-            blason_present = frames_with_blason > 0
+            total_frames = len(resultats_frames)
+            blason_present = frames_avec_blason > 0
 
             # Categorie et ROI dominantes parmi les frames positives
             if blason_present:
-                cats = [fr["blason_detecte"] for fr in frame_results
+                cats = [fr["blason_detecte"] for fr in resultats_frames
                         if fr["blason_present"] and fr["blason_detecte"]]
-                rois = [fr["blason_roi"] for fr in frame_results
-                        if fr["blason_present"] and fr["blason_roi"]]
+                rois = [fr["blason_zone"] for fr in resultats_frames
+                        if fr["blason_present"] and fr["blason_zone"]]
                 blason_detecte = max(set(cats), key=cats.count) if cats else None
-                blason_roi = max(set(rois), key=rois.count) if rois else None
+                blason_zone = max(set(rois), key=rois.count) if rois else None
             else:
                 blason_detecte = None
-                blason_roi = None
+                blason_zone = None
 
             if blason_present:
                 total_detections += 1
@@ -500,31 +503,31 @@ def main():
             # Enrichir JSONL (3 champs)
             msg["blason_present"] = blason_present
             msg["blason_detecte"] = blason_detecte
-            msg["blason_roi"] = blason_roi
+            msg["blason_zone"] = blason_zone
 
             # Enrichir fiche (3 champs)
-            fiche_fields = {
+            champs_fiche = {
                 "blason_present": blason_present,
                 "blason_detecte": blason_detecte,
-                "blason_roi": blason_roi,
+                "blason_zone": blason_zone,
             }
-            update_fiche(msg, fiche_fields, fiches_dir,
-                         overwrite=args.overwrite)
+            mettre_a_jour_fiche(msg, champs_fiche, fiches_dir,
+                                overwrite=args.overwrite)
 
-            processed += 1
+            n_traites += 1
 
             label_str = f" [{blason_detecte}]" if blason_present else ""
-            max_inliers = max(fr["n_inliers"] for fr in frame_results) if frame_results else 0
+            max_inliers = max(fr["n_inliers"] for fr in resultats_frames) if resultats_frames else 0
             tqdm.write(
-                f"  msg {mid}: {frames_with_blason}/{total_frames} frames "
+                f"  msg {mid}: {frames_avec_blason}/{total_frames} frames "
                 f"avec blason{label_str} (max inliers: {max_inliers})"
             )
 
             # Sauvegarde intermediaire
-            if processed % save_every == 0:
+            if n_traites % save_every == 0:
                 write_jsonl(messages, output_path)
                 csv_file.flush()
-                log.info(f"  Sauvegarde intermediaire ({processed} traites)")
+                log.info(f"  Sauvegarde intermediaire ({n_traites} traites)")
 
     except KeyboardInterrupt:
         log.info("\nInterruption clavier — sauvegarde en cours...")
@@ -533,11 +536,11 @@ def main():
         write_jsonl(messages, output_path)
 
     elapsed = time.time() - t0
-    skipped = n_eligible - processed - errors
+    skipped = n_eligibles - n_traites - n_erreurs
     log.info(
         f"\nTermine en {fmt_eta(elapsed)} — "
-        f"{processed} traites, {total_detections} avec blason, "
-        f"{skipped} skippes, {errors} erreurs."
+        f"{n_traites} traites, {total_detections} avec blason, "
+        f"{skipped} skippes, {n_erreurs} erreurs."
     )
     log.info(f"CSV : {csv_path}")
     log.info(f"JSONL : {output_path}")

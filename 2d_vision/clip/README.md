@@ -1,32 +1,34 @@
-# CLIP Zero-Shot Classification
+# 2d_vision/clip — Classification zero-shot CLIP (limite méthodologique)
 
-Classification zero-shot des ~32K keyframes du corpus Magyar via CLIP (openai/clip-vit-large-patch14).
+Classification zero-shot des keyframes du corpus Magyar via CLIP
+(`openai/clip-vit-large-patch14`), sous forme de **6 classifieurs binaires
+indépendants**. **Limite documentée :** le zero-shot CLIP discrimine mal
+l'imagerie de guerre (scènes proches, flou, compression, thermique) ; les
+résultats ne sont **pas retenus** dans le mémoire et ce module n'écrit
+**aucun champ JSONL** — seuls des CSV sont produits, conservés pour traçabilité.
 
-## Labels
-
-**Set 1 — Contexte visuel (11 labels)** : outdoor battlefield, trench or fortification, military vehicle, drone first-person view, drone aerial surveillance view, indoor command post, person talking to camera, FPV impact explosion, thermal or night vision, text overlay or title card, ruins or destroyed building.
-
-**Set 2 — Presence humaine (5 labels)** : no people visible, single person visible, group of soldiers, dead or wounded body on ground, person running or crawling.
-
-## Usage
+## Utilisation
 
 ```bash
 pip install -r requirements.txt
 
-# Classification (GPU recommande)
-python clip_classify.py --limit 5        # test rapide
-python clip_classify.py                  # corpus complet (~30 min GPU)
-python clip_classify.py --batch-size 64  # si VRAM suffisante
+# Classification (GPU recommandé, ~30 min corpus complet)
+python clip_classify.py
+#   --limit 5         test rapide
+#   --batch-size 64   si VRAM suffisante
 
-# Agregation + graphiques
+# Agrégation par message
 python aggregate_clip.py
 ```
 
 ## Input / Output
 
-**Entrée :** JSONL enrichi (messages avec `keyframes_count > 0`), keyframes PNG dans `fiches/keyframes/`.
+**Entrée :** JSONL canonique (`messages_clean.jsonl`, défaut depuis
+`config.yaml`) + keyframes PNG déjà extraites dans `fiches/keyframes/`
+(filtrage par glob `{canal}_{message_id}_kf_*` — pas de champ JSONL pour les
+keyframes).
 
-**CSV produit** (`results/clip_classification.csv`) : 1 ligne par keyframe.
+**`clip_classify.py` → `results/clip_classification.csv`** (1 ligne par keyframe) :
 
 | Colonne | Type | Description |
 |---------|------|-------------|
@@ -34,35 +36,40 @@ python aggregate_clip.py
 | `frame_filename` | str | Nom du fichier keyframe |
 | `date` | str | Date du message |
 | `phase` | str | Phase du corpus (P1/P2/P3) |
-| `scene_<label>` | float | Probabilité softmax groupe SCENE (9 labels, somme = 1) |
-| `content_<label>` | float | Probabilité softmax groupe CONTENT (6 labels, somme = 1) |
+| `clip_vlog` | float | Personne face caméra, style selfie vlog |
+| `clip_aerial` | float | Vue aérienne top-down terrain (ISR) |
+| `clip_fpv` | float | Drone FPV (prop guards circulaires visibles) |
+| `clip_stats` | float | Carte stats institutionnelle (fond noir + chiffres) |
+| `clip_screen` | float | Filmer un écran / contrôleur DJI |
+| `clip_strike` | float | Impact / explosion / destruction vue aérienne |
 
-**Sorties agrégées** (`aggregate_clip.py`) :
+Chaque score est une probabilité 0→1 issue d'un `softmax([prompt_positif,
+prompt_négatif])` propre au concept. Les scores sont **indépendants** (pas de
+compétition softmax entre concepts) : une frame peut scorer haut sur plusieurs.
 
-| Fichier | Description |
-|---------|-------------|
-| `clip_by_message.csv` | Label dominant + probas moyennes par message |
-| `clip_by_phase.csv` | Distribution des labels dominants par phase (% messages) |
-| `clip_monthly.csv` | Probabilités moyennes mensuelles par label |
-| `clip_stacked_bar_phase.png` | Stacked bar chart des labels de scène par phase |
-| `clip_monthly_lines.png` | Courbes mensuelles pour 3 catégories clés |
-| `clip_heatmap.png` | Heatmap mois × labels de scène |
-
-**Champs JSONL enrichis** (par `aggregate_clip.py --no-enrich-jsonl` pour désactiver) :
-
-| Champ | Type | Description |
-|-------|------|-------------|
-| `clip_scene_dominant` | str | Label de scène dominant (argmax) |
-| `clip_human_dominant` | str | Label de contenu humain dominant |
-| `clip_scene_<label>` | float | Score moyen 0–1 pour chaque label scène |
-| `clip_human_<label>` | float | Score moyen 0–1 pour chaque label contenu |
+**`aggregate_clip.py` → `results/clip_by_message.csv`** (1 ligne par message) :
+agrège les frames d'un même message selon `CLIP_AGG` (`mean` pour la présence
+continue : vlog/aerial/screen/strike ; `max` pour l'événement ponctuel : stats ;
+`p75` pour fpv), plus un booléen `{concept}_flag` (score > `--threshold`, défaut 0.60).
 
 ## Méthodologie
 
-**Pourquoi CLIP zero-shot ?** CLIP (Contrastive Language-Image Pretraining, Radford et al. 2021) permet de classer des images sans données d'entraînement annotées propres au corpus. Pour un corpus de ~32K keyframes militaires ukrainiennes, annoter manuellement un jeu d'entraînement représentatif serait prohibitif. CLIP fournit une classification exploitable directement.
+**Pourquoi binaire plutôt que softmax multi-classe ?** Une softmax sur 9–12
+labels dilue les probabilités entre classes visuellement proches (« drone
+surveillance » vs « FPV » se cannibalisent). Chaque concept reçoit donc sa
+propre comparaison positif/négatif calibrée, le prompt négatif étant choisi
+pour être visuellement opposé (pas un simple « not X »).
 
-**Modèle `openai/clip-vit-large-patch14`** : le plus grand modèle CLIP publiquement disponible, avec de meilleures performances zero-shot que les variantes ViT-B/32 ou ViT-B/16. Cohérent avec la taille du corpus et la disponibilité GPU.
+**Labels en anglais :** CLIP est entraîné majoritairement sur des captions
+anglaises ; les performances zero-shot sur des labels FR/UK sont nettement
+inférieures. Les prompts sont rédigés pour être discriminants dans le contexte
+militaire (ex. « FPV drone video where the curved propeller guard ring is
+visible » plutôt que « drone video »).
 
-**Labels en anglais** : CLIP est entraîné majoritairement sur du texte anglais. Les performances zero-shot sur des labels en français ou ukrainien sont notablement inférieures. Les labels ont été rédigés pour être discriminatifs et non ambigus dans le contexte militaire (ex. "first-person view from a flying drone" plutôt que "drone video").
+**Modèle `openai/clip-vit-large-patch14` :** le plus grand CLIP publiquement
+disponible, meilleures performances zero-shot que ViT-B/32 ou ViT-B/16.
 
-**Deux groupes softmax indépendants** : SCENE (type de plan / source de l'image) et CONTENT (ce qui est visible). Un seul softmax sur tous les labels produirait une compétition artificielle entre catégories conceptuellement orthogonales. Deux passes séparées permettent d'obtenir une probabilité normalisée au sein de chaque groupe sémantique.
+**Limite retenue (formulation mémoire) :** *« La classification zero-shot CLIP
+(ViT-L/14) a été testée sur les keyframes du corpus. Les résultats n'ont pas
+été retenus en raison d'une discrimination insuffisante entre concepts dans le
+contexte de l'imagerie de guerre. »* Aucune relance ni écriture JSONL prévue.

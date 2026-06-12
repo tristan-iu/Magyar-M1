@@ -1,7 +1,10 @@
+# clip_classify.py — CLIP zero-shot (GPU recommandé)
 transformers>=4.30
 torch>=2.0
 Pillow>=9.0
 tqdm>=4.60
+# aggregate_clip.py — agrégation par message
 pandas>=1.5
-matplotlib>=3.6
-seaborn>=0.12
+
+# pyyaml : requis par 0_config/utils.py (load_config)
+pyyaml>=6.0

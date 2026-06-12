@@ -3,7 +3,7 @@
 Classification zero-shot CLIP sur les keyframes du corpus Magyar.
 Produit un CSV avec les scores binaires par concept pour chaque keyframe.
 
-Architecture : 7 classifieurs binaires independants.
+Architecture : 6 classifieurs binaires independants.
 Chaque classifieur = softmax(pos_prompt, neg_prompt)[0] → score 0→1.
 Les scores sont independants (pas de competition softmax entre concepts).
 
@@ -20,9 +20,13 @@ Concepts detectes :
   clip_stats  — carte stats institutionnelle (fond noir + ВИЯВЛЕНО X)
   clip_screen — filmer un ecran/controleur DJI
   clip_strike — impact/explosion/destruction vue aerienne
-  clip_hud    — HUD telemetrie drone (chiffres ALT/vitesse/distance)
 
-CSV produit : message_id, frame_filename, date, phase, clip_vlog, ..., clip_hud
+CSV produit : message_id, frame_filename, date, phase, clip_vlog, ..., clip_strike
+
+NOTE — limite methodologique : le zero-shot CLIP (ViT-L/14) ne discrimine pas
+assez les images de guerre (scenes proches, flou, compression, thermique). Les
+resultats ne sont PAS retenus pour le memoire et ce script n'ecrit QUE le CSV
+(aucun champ JSONL). Conserve pour tracabilite, pas pour relance.
 
 Options CLI : --input, --csv, --batch-size, --limit, --ids, --overwrite,
               --start-date, --end-date, --config
@@ -40,11 +44,11 @@ from tqdm import tqdm
 _UTILS_DIR = Path(__file__).resolve().parents[2] / "0_config"
 sys.path.insert(0, str(_UTILS_DIR))
 from utils import (  # noqa: E402
-    build_base_parser,
+    creer_parser_base,
     load_config,
-    setup_logging,
+    init_logger,
     read_jsonl,
-    phase_label,
+    etiquette_phase,
     fmt_eta,
 )
 
@@ -56,7 +60,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # Labels en anglais : CLIP est entraine sur des captions anglaises.
 # Le prompt negatif est choisi pour etre visuellement oppose, pas juste "not X".
 
-BINARY_CLASSIFIERS = [
+CLASSIFIEURS_BINAIRES = [
     (
         "clip_vlog",
         "a soldier or person speaking directly into a handheld camera "
@@ -104,11 +108,11 @@ BINARY_CLASSIFIERS = [
 ]
 
 # Noms de colonnes pour le CSV
-CLIP_COLS = [name for name, _, _ in BINARY_CLASSIFIERS]  # 6 concepts
+CLIP_COLS = [name for name, _, _ in CLASSIFIEURS_BINAIRES]  # 6 concepts
 CSV_FIELDNAMES = ["message_id", "frame_filename", "date", "phase"] + CLIP_COLS
 
 
-def load_existing_csv(csv_path: Path) -> set[str]:
+def charger_frames_termines(csv_path: Path) -> set[str]:
     """Charge les noms de frames deja traites dans le CSV (idempotence)."""
     done = set()
     if not csv_path.is_file():
@@ -120,9 +124,9 @@ def load_existing_csv(csv_path: Path) -> set[str]:
     return done
 
 
-def collect_frames(messages: list[dict], keyframes_dir: Path,
-                   ids_filter: set[int] | None, limit: int | None,
-                   overwrite: bool, done_frames: set[str],
+def collecter_frames(messages: list[dict], keyframes_dir: Path,
+                   filtre_ids: set[int] | None, limit: int | None,
+                   overwrite: bool, frames_termines: set[str],
                    cfg: dict,
                    start_date=None, end_date=None) -> list[dict]:
     """Liste toutes les keyframes eligibles avec leurs metadonnees message."""
@@ -131,7 +135,7 @@ def collect_frames(messages: list[dict], keyframes_dir: Path,
     msg_count = 0
     for msg in messages:
         mid = msg["message_id"]
-        if ids_filter and mid not in ids_filter:
+        if filtre_ids and mid not in filtre_ids:
             continue
         if start_date or end_date:
             raw = msg.get("date")
@@ -148,15 +152,13 @@ def collect_frames(messages: list[dict], keyframes_dir: Path,
                 continue
             if end_date and msg_date > end_date:
                 continue
-        kf_count = msg.get("keyframes_count", 0)
-        if not kf_count or kf_count <= 0:
-            continue
         if limit and msg_count >= limit:
             break
 
-        channel = msg.get("channel", "robert_magyar")
+        # Pas de champ JSONL pour les keyframes — on filtre par glob ci-dessous.
+        channel = msg.get("canal", "robert_magyar")
         msg_date_str = msg.get("date", "")
-        phase = phase_label(msg_date_str, cfg) if msg_date_str else ""
+        phase = etiquette_phase(msg_date_str, cfg) if msg_date_str else ""
 
         kf_pattern = f"{channel}_{mid}_kf_"
         kf_files = sorted(
@@ -168,7 +170,7 @@ def collect_frames(messages: list[dict], keyframes_dir: Path,
 
         has_new = False
         for kf_path in kf_files:
-            if not overwrite and kf_path.name in done_frames:
+            if not overwrite and kf_path.name in frames_termines:
                 continue
             has_new = True
             frames.append({
@@ -185,25 +187,25 @@ def collect_frames(messages: list[dict], keyframes_dir: Path,
     return frames
 
 
-def classify_batch(images: list[Image.Image], processor, model,
+def classifier_lot(images: list[Image.Image], processor, model,
                    device: torch.device) -> list[dict]:
-    """Classifie un batch d'images via 7 classifieurs binaires independants.
+    """Classifie un batch d'images via 6 classifieurs binaires independants.
 
     Pour chaque concept : softmax([prompt_positif, prompt_negatif])[0].
-    Les 7 passes sont regroupees en une seule operation matricielle
+    Les 6 passes sont regroupees en une seule operation matricielle
     pour minimiser les allers-retours GPU.
 
     Retourne une liste de dicts {clip_col: score} (1 dict par image).
     """
     n_images = len(images)
-    n_classifiers = len(BINARY_CLASSIFIERS)
+    n_classifiers = len(CLASSIFIEURS_BINAIRES)
 
     # Construire la liste de tous les prompts (positif + negatif pour chaque)
     all_prompts = []
-    for _, pos, neg in BINARY_CLASSIFIERS:
+    for _, pos, neg in CLASSIFIEURS_BINAIRES:
         all_prompts.append(pos)
         all_prompts.append(neg)
-    # all_prompts : 14 textes (2 × 7 classifieurs)
+    # all_prompts : 12 textes (2 × 6 classifieurs)
 
     with torch.no_grad():
         inputs = processor(
@@ -215,13 +217,13 @@ def classify_batch(images: list[Image.Image], processor, model,
         )
         inputs = {k: v.to(device) for k, v in inputs.items()}
         outputs = model(**inputs)
-        # logits_per_image : (n_images, 14)
-        logits = outputs.logits_per_image  # shape: (n_images, 14)
+        # logits_per_image : (n_images, 12)
+        logits = outputs.logits_per_image  # shape: (n_images, 12)
 
     results = []
     for i in range(n_images):
         row = {}
-        for j, (col_name, _, _) in enumerate(BINARY_CLASSIFIERS):
+        for j, (col_name, _, _) in enumerate(CLASSIFIEURS_BINAIRES):
             # Extraire les logits pour ce classifieur (pos=2j, neg=2j+1)
             pair_logits = logits[i, [2 * j, 2 * j + 1]]
             score = float(torch.softmax(pair_logits, dim=0)[0].cpu())
@@ -232,7 +234,7 @@ def classify_batch(images: list[Image.Image], processor, model,
 
 
 def main():
-    parser = build_base_parser(
+    parser = creer_parser_base(
         "Classification zero-shot CLIP binaire sur les keyframes",
         has_input=False, has_output=False,
     )
@@ -243,14 +245,13 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config) if args.config else load_config()
-    log = setup_logging("clip", cfg=cfg)
+    log = init_logger("clip", cfg=cfg)
 
     corpus_base = Path(cfg["paths"]["corpus_base"])
     keyframes_dir = Path(cfg["paths"]["keyframes_dir"])
 
     input_path = (Path(args.input) if args.input
-                  else corpus_base / cfg["paths"].get("jsonl_faces",
-                                                       cfg["paths"]["jsonl_computervision"]))
+                  else corpus_base / cfg["paths"]["jsonl_clean"])
     csv_path = Path(args.csv)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -266,19 +267,19 @@ def main():
     from transformers import CLIPProcessor, CLIPModel
     processor = CLIPProcessor.from_pretrained(model_name)
     model = CLIPModel.from_pretrained(model_name).to(device).eval()
-    log.info(f"Modele charge — {len(BINARY_CLASSIFIERS)} classifieurs binaires")
-    for col, pos, _ in BINARY_CLASSIFIERS:
+    log.info(f"Modele charge — {len(CLASSIFIEURS_BINAIRES)} classifieurs binaires")
+    for col, pos, _ in CLASSIFIEURS_BINAIRES:
         log.info(f"  {col}: \"{pos[:60]}...\"")
 
     messages = read_jsonl(input_path)
     log.info(f"Corpus : {len(messages)} messages")
 
-    done_frames = load_existing_csv(csv_path) if not args.overwrite else set()
-    log.info(f"Frames deja traitees (CSV) : {len(done_frames)}")
+    frames_termines = charger_frames_termines(csv_path) if not args.overwrite else set()
+    log.info(f"Frames deja traitees (CSV) : {len(frames_termines)}")
 
-    ids_filter = set(args.ids) if args.ids else None
-    frames = collect_frames(messages, keyframes_dir, ids_filter,
-                            args.limit, args.overwrite, done_frames, cfg,
+    filtre_ids = set(args.ids) if args.ids else None
+    frames = collecter_frames(messages, keyframes_dir, filtre_ids,
+                            args.limit, args.overwrite, frames_termines, cfg,
                             start_date=args.start_date, end_date=args.end_date)
     log.info(f"Frames a traiter : {len(frames)}")
 
@@ -286,7 +287,7 @@ def main():
         log.info("Rien a faire.")
         return
 
-    csv_mode = "w" if args.overwrite or not done_frames else "a"
+    csv_mode = "w" if args.overwrite or not frames_termines else "a"
     csv_file = open(csv_path, csv_mode, newline="", encoding="utf-8")
     csv_writer = csv.DictWriter(csv_file, fieldnames=CSV_FIELDNAMES)
     if csv_mode == "w":
@@ -302,21 +303,21 @@ def main():
             batch_frames = frames[start:end]
 
             images = []
-            valid_indices = []
+            indices_valides = []
             for i, fr in enumerate(batch_frames):
                 try:
                     img = Image.open(fr["frame_path"]).convert("RGB")
                     images.append(img)
-                    valid_indices.append(i)
+                    indices_valides.append(i)
                 except Exception as e:
                     log.warning(f"Erreur lecture {fr['frame_filename']}: {e}")
 
             if not images:
                 continue
 
-            scores = classify_batch(images, processor, model, device)
+            scores = classifier_lot(images, processor, model, device)
 
-            for idx, score_dict in zip(valid_indices, scores):
+            for idx, score_dict in zip(indices_valides, scores):
                 fr = batch_frames[idx]
                 row = {
                     "message_id": fr["message_id"],

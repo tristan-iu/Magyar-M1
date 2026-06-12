@@ -1,6 +1,6 @@
-# Detection de presence Magyar (InsightFace)
+# 2d_vision/visages — Détection de présence Magyar (InsightFace)
 
-Detection du visage de Magyar (Robert Brovdi) dans les keyframes du corpus Telegram, pour quantifier son effacement physique entre P1 (artisanal) et P3 (institutionnel).
+Détection du visage de Magyar (Robert Brovdi) dans les keyframes du corpus Telegram, pour quantifier son effacement physique entre P1 (artisanal) et P3 (institutionnel).
 
 ## Pipeline
 
@@ -18,37 +18,25 @@ pip install -r requirements.txt
 pip install insightface onnxruntime-gpu numpy opencv-python matplotlib tqdm
 ```
 
-## Usage
+## Utilisation
 
-### 1. Preparer les photos de reference
-
-Placer 5-10 photos nettes de Magyar dans `references/magyar/`. Formats acceptes : jpg, jpeg, png, webp, bmp. Privilegier des photos variees (angles, eclairage, avec/sans casque si possible).
-
-### 2. Calculer l'embedding de reference
+Prerequis : placer 5-10 photos nettes de Magyar dans `references/magyar/`
+(jpg/jpeg/png/webp/bmp ; varier angles, eclairage, avec/sans casque si possible).
 
 ```bash
+# 1. Embedding de reference (moyenne des photos)
 python build_reference.py
-# Options :
-python build_reference.py --references-dir references/magyar/ --output references/magyar_embedding.npy
-```
+#   --references-dir references/magyar/    dossier source
+#   --output references/magyar_embedding.npy
 
-### 3. Detecter Magyar dans les keyframes
-
-```bash
+# 2. Detection sur les keyframes
 python detect_magyar.py
-# Tester sur 10 messages :
-python detect_magyar.py --limit 10
-# Messages specifiques :
-python detect_magyar.py --ids 42 138 256
-# Ajuster le seuil :
-python detect_magyar.py --threshold 0.35
-# Retraiter tout :
-python detect_magyar.py --overwrite
-```
+#   --limit 10          test sur 10 messages
+#   --ids 42 138 256    messages specifiques
+#   --threshold 0.35    seuil cosine (defaut 0.4, voir plus bas)
+#   --overwrite         retraite tout
 
-### 4. Agreger et visualiser
-
-```bash
+# 3. Agregation par message/phase + graphique
 python aggregate_magyar.py
 ```
 
@@ -62,10 +50,13 @@ Sorties dans `results/` :
 
 | Champ | Type | Description |
 |-------|------|-------------|
-| `faces_magyar_present` | bool | Magyar detecte dans au moins une frame |
-| `faces_magyar_ratio` | float | Proportion de frames avec Magyar |
-| `faces_avg_count` | float | Nombre moyen de visages par frame |
-| `faces_max_similarity` | float | Similarite cosine maximale avec la reference |
+| `visages_magyar_ratio` | float | Proportion de frames avec Magyar |
+| `visages_magyar_detections` | int | Nombre total de frames Magyar detecte |
+| `visages_magyar_similarite_max` | float | Similarite cosine maximale avec la reference |
+| `visages_unique` | int | Personnes distinctes detectees (DBSCAN) |
+| `visages_densite` | float | Visages moyens par frame |
+
+`magyar_present` n'est plus ecrit : derivable strictement de `visages_magyar_detections > 0`.
 
 ## Seuil de detection
 
@@ -85,7 +76,7 @@ Le seuil dans `config.yaml` (`insightface.identity_threshold: 0.6`) est une vale
 
 ## Idempotence
 
-- `detect_magyar.py` charge le CSV existant au demarrage et skip les frames deja traitees
+- `detect_magyar.py` charge le CSV existant au demarrage et skip les messages deja traites (idempotence au niveau message, pas frame)
 - Relancer sans `--overwrite` ne retraite que les nouveaux messages
 - Le JSONL est sauvegarde tous les 50 messages (configurable via `batch.save_every`)
 

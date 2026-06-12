@@ -1,0 +1,18 @@
+# ── keyframer.py (extraction keyframes + OCR + SceneDetect) ─────────────────
+easyocr>=1.7
+scenedetect[opencv]>=0.6
+opencv-python>=4.8
+Pillow>=10.0
+numpy>=1.24
+
+# ── scene_detect.py (agrégation + graphique mensuel) ────────────────────────
+matplotlib>=3.7
+pandas>=1.5
+tqdm>=4.65
+
+# ── phash_keyframes.py (pHash par keyframe) ─────────────────────────────────
+# imagehash : pHash 64-bit (même logique que telegram_scraper). Import paresseux.
+imagehash>=4.3
+
+# pyyaml : requis par 0_config/utils.py (load_config)
+pyyaml>=6.0

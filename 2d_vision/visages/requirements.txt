@@ -1,0 +1,12 @@
+# detect_magyar.py / build_reference.py — InsightFace (embeddings ArcFace)
+insightface>=0.7
+onnxruntime-gpu>=1.16   # CPU seul : remplacer par onnxruntime
+numpy>=1.24
+opencv-python>=4.8
+scikit-learn>=1.3       # DBSCAN (comptage d'individus distincts)
+# aggregate_magyar.py — agrégation + graphique mensuel
+matplotlib>=3.7
+tqdm>=4.65
+
+# pyyaml : requis par 0_config/utils.py (load_config)
+pyyaml>=6.0

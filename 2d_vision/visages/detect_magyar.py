@@ -11,12 +11,12 @@ Pipeline par message :
   4. CSV per-face avec position temporelle pour analyse intra-video
 
 Champs JSONL produits :
-  - faces_magyar_present   (bool)  — Magyar detecte dans au moins 1 frame
-  - faces_magyar_ratio     (float) — proportion de frames avec Magyar
-  - faces_avg_count        (float) — nb moyen de visages par frame
-  - faces_max_similarity   (float) — score cosine max vs reference
-  - faces_unique_count     (int)   — nb d'individus distincts (DBSCAN)
-  - faces_magyar_detections (int)  — nb de detections dans le cluster Magyar
+  - visages_magyar_ratio          (float) — proportion de frames avec Magyar
+  - visages_densite               (float) — nb moyen de visages par frame
+  - visages_magyar_similarite_max (float) — score cosine max vs reference
+  - visages_unique                (int)   — nb d'individus distincts (DBSCAN)
+  - visages_magyar_detections     (int)   — nb de detections dans le cluster Magyar
+                                            (presence : visages_magyar_detections > 0)
 
 CSV per-face (1 ligne = 1 visage detecte) :
   message_id, frame_filename, frame_index, frame_position,
@@ -46,14 +46,14 @@ from tqdm import tqdm
 _UTILS_DIR = Path(__file__).resolve().parents[2] / "0_config"
 sys.path.insert(0, str(_UTILS_DIR))
 from utils import (  # noqa: E402
-    build_base_parser,
+    creer_parser_base,
     load_config,
-    setup_logging,
+    init_logger,
     read_jsonl,
     write_jsonl,
-    update_fiche,
-    phase_label,
-    filter_eligible,
+    mettre_a_jour_fiche,
+    etiquette_phase,
+    filtrer_eligibles,
     fmt_eta,
 )
 
@@ -67,7 +67,7 @@ CSV_FIELDNAMES = [
 ]
 
 
-def imread_safe(path: str):
+def lire_image_safe(path: str):
     """Lit une image de manière sécurisée (chemins avec accents/unicode).
 
     Entrée : path — chemin vers le fichier image
@@ -95,7 +95,7 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (norm_a * norm_b))
 
 
-def parse_frame_index(filename: str) -> int:
+def analyser_index_frame(filename: str) -> int:
     """Extrait l'index numérique d'un nom de keyframe.
 
     Exemple : 'robert_magyar_123_kf_0005.png' → 5
@@ -108,7 +108,7 @@ def parse_frame_index(filename: str) -> int:
     return int(m.group(1)) if m else 1
 
 
-def cluster_faces(embeddings: list[np.ndarray], eps: float = 0.55) -> np.ndarray:
+def clusteriser_visages(embeddings: list[np.ndarray], eps: float = 0.55) -> np.ndarray:
     """Clusterise les embeddings faciaux via DBSCAN sur distance cosine.
 
     eps = seuil de distance cosine (1 − similarité) : eps=0.55 → similarité
@@ -144,7 +144,7 @@ def cluster_faces(embeddings: list[np.ndarray], eps: float = 0.55) -> np.ndarray
     return labels
 
 
-def load_existing_csv_messages(csv_path: Path) -> set[int]:
+def charger_msgs_termines(csv_path: Path) -> set[int]:
     """Charge les message_id déjà présents dans le CSV (idempotence).
 
     Entrée : csv_path — Path vers le CSV per-face
@@ -161,7 +161,7 @@ def load_existing_csv_messages(csv_path: Path) -> set[int]:
 
 
 def main():
-    parser = build_base_parser(
+    parser = creer_parser_base(
         "Detection de Magyar + comptage individus distincts (InsightFace + DBSCAN)",
         has_input=False, has_output=False,
     )
@@ -188,7 +188,7 @@ def main():
 
     # Config
     cfg = load_config(args.config) if args.config else load_config()
-    log = setup_logging("insightface", cfg=cfg)
+    log = init_logger("insightface", cfg=cfg)
 
     corpus_base = Path(cfg["paths"]["corpus_base"])
     keyframes_dir = Path(cfg["paths"]["keyframes_dir"])
@@ -197,7 +197,7 @@ def main():
 
     # Chemins I/O
     input_path = (Path(args.input) if args.input
-                  else corpus_base / cfg["paths"]["jsonl_faces"])
+                  else corpus_base / cfg["paths"]["jsonl_clean"])
     output_path = (Path(args.output) if args.output
                    else corpus_base / "messages_faces.jsonl")
     embedding_path = Path(args.embedding)
@@ -233,31 +233,33 @@ def main():
     log.info(f"Corpus : {len(messages)} messages")
 
     # Filtrer messages avec keyframes ou photos
-    ids_filter = set(args.ids) if args.ids else None
-    eligible_indices = filter_eligible(
+    filtre_ids = set(args.ids) if args.ids else None
+    indices_eligibles = filtrer_eligibles(
         messages,
-        ids_filter=ids_filter,
-        check_fields=["faces_magyar_present", "faces_unique_count"],
+        filtre_ids=filtre_ids,
+        media_types=["video", "photo"],
+        champs_a_verifier=["visages_magyar_detections", "visages_unique"],
         overwrite=args.overwrite,
         start_date=args.start_date,
         end_date=args.end_date,
     )
-    eligible_indices = [
-        i for i in eligible_indices
-        if (messages[i].get("keyframes_count") or 0) > 0
-        or (messages[i].get("media_type") == "photo"
-            and messages[i].get("media_path"))
+    # Pour les photos, exiger un media_chemin ; pour les videos, on glob les
+    # keyframes dans la boucle (kf_files vide → skip avec warning)
+    indices_eligibles = [
+        i for i in indices_eligibles
+        if messages[i].get("media_type") == "video"
+        or messages[i].get("media_chemin")
     ]
 
     if args.limit:
-        eligible_indices = eligible_indices[:args.limit]
+        indices_eligibles = indices_eligibles[:args.limit]
 
-    n_eligible = len(eligible_indices)
-    log.info(f"Messages eligibles (keyframes + photos) : {n_eligible}")
+    n_eligibles = len(indices_eligibles)
+    log.info(f"Messages eligibles (keyframes + photos) : {n_eligibles}")
     log.info(f"Seuil Magyar : {args.threshold} | "
              f"DBSCAN eps : {args.cluster_eps}")
 
-    if n_eligible == 0:
+    if n_eligibles == 0:
         log.info("Rien a faire.")
         if input_path != output_path:
             write_jsonl(messages, output_path)
@@ -265,28 +267,28 @@ def main():
 
     # CSV : idempotence au niveau message
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    done_msgs = load_existing_csv_messages(csv_path) if not args.overwrite else set()
-    log.info(f"Messages deja dans le CSV : {len(done_msgs)}")
+    msgs_termines = charger_msgs_termines(csv_path) if not args.overwrite else set()
+    log.info(f"Messages deja dans le CSV : {len(msgs_termines)}")
 
     # Ouvrir CSV en append (ou ecriture si overwrite)
     csv_mode = "w" if args.overwrite else "a"
     csv_file = open(csv_path, csv_mode, newline="", encoding="utf-8")
     csv_writer = csv.DictWriter(csv_file, fieldnames=CSV_FIELDNAMES)
-    if args.overwrite or not done_msgs:
+    if args.overwrite or not msgs_termines:
         csv_writer.writeheader()
 
-    processed = 0
-    errors = 0
+    n_traites = 0
+    n_erreurs = 0
     t0 = time.time()
 
     try:
-        for rank, idx in enumerate(tqdm(eligible_indices,
+        for rank, idx in enumerate(tqdm(indices_eligibles,
                                         desc="InsightFace", unit="msg")):
             msg = messages[idx]
             mid = msg["message_id"]
-            channel = msg.get("channel", "robert_magyar")
+            channel = msg.get("canal", "robert_magyar")
             msg_date = msg.get("date", "")
-            phase = phase_label(msg_date, cfg) if msg_date else None
+            phase = etiquette_phase(msg_date, cfg) if msg_date else None
 
             # ── Lister les keyframes (ou photo directe) ──
             kf_pattern = f"{channel}_{mid}_kf_"
@@ -296,30 +298,30 @@ def main():
                 and p.suffix in (".jpg", ".png")
             )
 
-            is_photo = False
+            est_photo = False
             if not kf_files:
-                media_path = msg.get("media_path", "")
-                photo_file = corpus_base / media_path if media_path else None
-                if photo_file and photo_file.is_file():
-                    kf_files = [photo_file]
-                    is_photo = True
+                media_chemin_rel = msg.get("media_chemin", "")
+                fichier_photo = corpus_base / media_chemin_rel if media_chemin_rel else None
+                if fichier_photo and fichier_photo.is_file():
+                    kf_files = [fichier_photo]
+                    est_photo = True
                 else:
                     log.warning(f"msg {mid} : aucune keyframe ni photo")
-                    errors += 1
+                    n_erreurs += 1
                     continue
 
             total_kf = len(kf_files)
 
             # ── Traiter chaque keyframe — collecter TOUS les embeddings ──
-            # face_data : toutes les detections du message, indexees par frame
-            face_data = []
-            frame_summaries = []
+            # donnees_visages : toutes les detections du message, indexees par frame
+            donnees_visages = []
+            resumes_frames = []
 
             for kf_idx, kf_path in enumerate(kf_files):
                 kf_name = kf_path.name
-                frame_index = 1 if is_photo else parse_frame_index(kf_name)
+                frame_index = 1 if est_photo else analyser_index_frame(kf_name)
 
-                img = imread_safe(str(kf_path))
+                img = lire_image_safe(str(kf_path))
                 if img is None:
                     log.warning(f"msg {mid} : impossible de lire {kf_name}")
                     continue
@@ -332,18 +334,18 @@ def main():
                     continue
 
                 n_faces = len(faces)
-                frame_magyar = False
-                frame_max_sim = 0.0
+                magyar_dans_frame = False
+                frame_sim_max = 0.0
 
                 for fi, face in enumerate(faces):
                     sim = cosine_similarity(face.embedding, ref_embedding)
                     is_magyar = sim >= args.threshold
                     if is_magyar:
-                        frame_magyar = True
-                    if sim > frame_max_sim:
-                        frame_max_sim = sim
+                        magyar_dans_frame = True
+                    if sim > frame_sim_max:
+                        frame_sim_max = sim
 
-                    face_data.append({
+                    donnees_visages.append({
                         "embedding": face.embedding,
                         "frame_name": kf_name,
                         "frame_index": frame_index,
@@ -355,42 +357,42 @@ def main():
                         "det_score": float(face.det_score),
                     })
 
-                frame_summaries.append({
+                resumes_frames.append({
                     "frame_name": kf_name,
                     "n_faces": n_faces,
-                    "magyar_detected": frame_magyar,
-                    "max_similarity": frame_max_sim,
+                    "magyar_detected": magyar_dans_frame,
+                    "max_similarity": frame_sim_max,
                 })
 
             # ── Skip si aucune frame traitee ──
-            if not frame_summaries:
+            if not resumes_frames:
                 continue
 
             # ── Clustering DBSCAN ──
-            n_unique = 0
-            magyar_detections = 0
+            n_uniques = 0
+            n_detections_magyar = 0
             cluster_labels = np.array([], dtype=int)
 
-            if face_data:
-                all_embeddings = [fd["embedding"] for fd in face_data]
-                cluster_labels = cluster_faces(
+            if donnees_visages:
+                all_embeddings = [fd["embedding"] for fd in donnees_visages]
+                cluster_labels = clusteriser_visages(
                     all_embeddings, eps=args.cluster_eps)
-                n_unique = int(len(set(cluster_labels)))
+                n_uniques = int(len(set(cluster_labels)))
 
                 # Identifier le(s) cluster(s) Magyar
-                magyar_clusters = set()
-                for i, fd in enumerate(face_data):
+                clusters_magyar = set()
+                for i, fd in enumerate(donnees_visages):
                     if fd["is_magyar"]:
-                        magyar_clusters.add(int(cluster_labels[i]))
+                        clusters_magyar.add(int(cluster_labels[i]))
 
                 # Compter les detections dans les clusters Magyar
-                for i, fd in enumerate(face_data):
-                    if int(cluster_labels[i]) in magyar_clusters:
-                        magyar_detections += 1
+                for i, fd in enumerate(donnees_visages):
+                    if int(cluster_labels[i]) in clusters_magyar:
+                        n_detections_magyar += 1
 
             # ── Ecrire CSV per-face (apres clustering) ──
-            if mid not in done_msgs:
-                for i, fd in enumerate(face_data):
+            if mid not in msgs_termines:
+                for i, fd in enumerate(donnees_visages):
                     # Position dans la video : 0.0 (debut) → 1.0 (fin)
                     if total_kf > 1:
                         frame_pos = round(fd["kf_idx"] / (total_kf - 1), 4)
@@ -415,9 +417,9 @@ def main():
                     })
 
                 # Ecrire aussi les frames sans visages (pour completude)
-                frames_with_faces = {fd["frame_name"] for fd in face_data}
-                for kf_idx, fs in enumerate(frame_summaries):
-                    if fs["frame_name"] not in frames_with_faces:
+                frames_avec_visages = {fd["frame_name"] for fd in donnees_visages}
+                for kf_idx, fs in enumerate(resumes_frames):
+                    if fs["frame_name"] not in frames_avec_visages:
                         if total_kf > 1:
                             frame_pos = round(kf_idx / (total_kf - 1), 4)
                         else:
@@ -425,7 +427,7 @@ def main():
                         csv_writer.writerow({
                             "message_id": mid,
                             "frame_filename": fs["frame_name"],
-                            "frame_index": parse_frame_index(fs["frame_name"]),
+                            "frame_index": analyser_index_frame(fs["frame_name"]),
                             "frame_position": frame_pos,
                             "face_index": -1,
                             "cluster_id": -1,
@@ -438,44 +440,43 @@ def main():
                         })
 
             # ── Agregation niveau message ──
-            total_frames = len(frame_summaries)
-            frames_with_magyar = sum(
-                1 for fs in frame_summaries if fs["magyar_detected"])
-            magyar_ratio = (round(frames_with_magyar / total_frames, 4)
+            total_frames = len(resumes_frames)
+            frames_avec_magyar = sum(
+                1 for fs in resumes_frames if fs["magyar_detected"])
+            ratio_magyar = (round(frames_avec_magyar / total_frames, 4)
                            if total_frames > 0 else 0.0)
-            avg_faces = (
-                round(sum(fs["n_faces"] for fs in frame_summaries)
+            moy_visages = (
+                round(sum(fs["n_faces"] for fs in resumes_frames)
                       / total_frames, 2)
                 if total_frames > 0 else 0.0)
             max_sim = max(
-                (fs["max_similarity"] for fs in frame_summaries), default=0.0)
+                (fs["max_similarity"] for fs in resumes_frames), default=0.0)
 
             # ── Enrichir JSONL ──
-            msg["faces_magyar_present"] = frames_with_magyar > 0
-            msg["faces_magyar_ratio"] = magyar_ratio
-            msg["faces_avg_count"] = avg_faces
-            msg["faces_max_similarity"] = round(max_sim, 4)
-            msg["faces_unique_count"] = n_unique
-            msg["faces_magyar_detections"] = magyar_detections
+            msg["visages_magyar_ratio"] = ratio_magyar
+            msg["visages_densite"] = moy_visages
+            msg["visages_magyar_similarite_max"] = round(max_sim, 4)
+            msg["visages_unique"] = n_uniques
+            msg["visages_magyar_detections"] = n_detections_magyar
 
             # ── Enrichir fiche ──
-            clusters_summary = []
-            if face_data and len(cluster_labels) > 0:
+            resume_clusters = []
+            if donnees_visages and len(cluster_labels) > 0:
                 for cid in sorted(set(cluster_labels)):
                     mask = cluster_labels == cid
-                    c_sims = [face_data[i]["similarity"]
-                              for i in range(len(face_data)) if mask[i]]
-                    c_magyar = [face_data[i]["is_magyar"]
-                                for i in range(len(face_data)) if mask[i]]
+                    c_sims = [donnees_visages[i]["similarity"]
+                              for i in range(len(donnees_visages)) if mask[i]]
+                    c_magyar = [donnees_visages[i]["is_magyar"]
+                                for i in range(len(donnees_visages)) if mask[i]]
                     c_frames = set(
-                        face_data[i]["frame_name"]
-                        for i in range(len(face_data)) if mask[i])
+                        donnees_visages[i]["frame_name"]
+                        for i in range(len(donnees_visages)) if mask[i])
                     # Position temporelle du cluster : premiere et derniere frame
                     c_positions = [
-                        face_data[i]["kf_idx"] / max(total_kf - 1, 1)
-                        for i in range(len(face_data)) if mask[i]
+                        donnees_visages[i]["kf_idx"] / max(total_kf - 1, 1)
+                        for i in range(len(donnees_visages)) if mask[i]
                     ]
-                    clusters_summary.append({
+                    resume_clusters.append({
                         "cluster_id": int(cid),
                         "n_detections": int(mask.sum()),
                         "n_frames": len(c_frames),
@@ -486,44 +487,43 @@ def main():
                         "last_position": round(max(c_positions), 4),
                     })
 
-            fiche_fields = {
-                "faces_magyar_present": frames_with_magyar > 0,
-                "faces_magyar_ratio": magyar_ratio,
-                "faces_avg_count": avg_faces,
-                "faces_max_similarity": round(max_sim, 4),
-                "faces_unique_count": n_unique,
-                "faces_magyar_detections": magyar_detections,
-                "faces_total_frames": total_frames,
-                "faces_frames_with_magyar": frames_with_magyar,
-                "faces_threshold": args.threshold,
-                "faces_cluster_eps": args.cluster_eps,
-                "faces_clusters": clusters_summary,
-                "faces_details": [
+            champs_fiche = {
+                "visages_magyar_ratio": ratio_magyar,
+                "visages_densite": moy_visages,
+                "visages_magyar_similarite_max": round(max_sim, 4),
+                "visages_unique": n_uniques,
+                "visages_magyar_detections": n_detections_magyar,
+                "visages_total_frames": total_frames,
+                "visages_frames_avec_magyar": frames_avec_magyar,
+                "visages_seuil": args.threshold,
+                "visages_cluster_eps": args.cluster_eps,
+                "visages_clusters": resume_clusters,
+                "visages_details": [
                     {
                         "frame": fs["frame_name"],
                         "n_faces": fs["n_faces"],
                         "magyar_detected": fs["magyar_detected"],
                         "max_similarity": round(fs["max_similarity"], 4),
                     }
-                    for fs in frame_summaries
+                    for fs in resumes_frames
                 ],
             }
-            update_fiche(msg, fiche_fields, fiches_dir,
-                         overwrite=args.overwrite)
+            mettre_a_jour_fiche(msg, champs_fiche, fiches_dir,
+                                overwrite=args.overwrite)
 
-            processed += 1
+            n_traites += 1
 
             tqdm.write(
-                f"  msg {mid}: {len(face_data)} visages, "
-                f"{n_unique} individus, "
-                f"magyar={frames_with_magyar}/{total_frames} frames"
+                f"  msg {mid}: {len(donnees_visages)} visages, "
+                f"{n_uniques} individus, "
+                f"magyar={frames_avec_magyar}/{total_frames} frames"
             )
 
             # Sauvegarde intermediaire
-            if processed % save_every == 0:
+            if n_traites % save_every == 0:
                 write_jsonl(messages, output_path)
                 csv_file.flush()
-                log.info(f"  Sauvegarde intermediaire ({processed} traites)")
+                log.info(f"  Sauvegarde intermediaire ({n_traites} traites)")
 
     except KeyboardInterrupt:
         log.info("\nInterruption clavier — sauvegarde en cours...")
@@ -532,10 +532,10 @@ def main():
         write_jsonl(messages, output_path)
 
     elapsed = time.time() - t0
-    skipped = n_eligible - processed - errors
+    skipped = n_eligibles - n_traites - n_erreurs
     log.info(
         f"\nTermine en {fmt_eta(elapsed)} — "
-        f"{processed} enrichis, {skipped} skippes, {errors} erreurs."
+        f"{n_traites} enrichis, {skipped} skippes, {n_erreurs} erreurs."
     )
     log.info(f"CSV : {csv_path}")
     log.info(f"JSONL : {output_path}")

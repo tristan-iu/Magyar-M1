@@ -19,7 +19,7 @@ import numpy as np
 
 _UTILS_DIR = Path(__file__).resolve().parents[2] / "0_config"
 sys.path.insert(0, str(_UTILS_DIR))
-from utils import load_config, setup_logging  # noqa: E402
+from utils import load_config, init_logger  # noqa: E402
 
 
 def imread_safe(path: str):
@@ -55,7 +55,7 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config) if args.config else load_config()
-    log = setup_logging("insightface", cfg=cfg)
+    log = init_logger("insightface", cfg=cfg)
 
     refs_dir = Path(args.references_dir)
     if not refs_dir.is_dir():

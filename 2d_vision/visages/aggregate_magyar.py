@@ -25,7 +25,7 @@ import numpy as np
 
 _UTILS_DIR = Path(__file__).resolve().parents[2] / "0_config"
 sys.path.insert(0, str(_UTILS_DIR))
-from utils import load_config, setup_logging  # noqa: E402
+from utils import load_config, init_logger  # noqa: E402
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -53,13 +53,13 @@ def read_perface_csv(csv_path: Path) -> list[dict]:
     return rows
 
 
-def aggregate_by_message(rows: list[dict]) -> list[dict]:
+def agreger_par_message(rows: list[dict]) -> list[dict]:
     """Agrège les lignes per-face en une ligne par message.
 
     Entrée : rows — liste de dicts (sortie de read_perface_csv)
     Sortie : liste de dicts agrégés (1 ligne par message_id)
     """
-    msg_data = defaultdict(lambda: {
+    donnees_msg = defaultdict(lambda: {
         "date": "", "phase": "",
         "frames": set(),
         "frames_with_magyar": set(),
@@ -72,7 +72,7 @@ def aggregate_by_message(rows: list[dict]) -> list[dict]:
 
     for row in rows:
         mid = row["message_id"]
-        d = msg_data[mid]
+        d = donnees_msg[mid]
         d["date"] = row["date"]
         d["phase"] = row["phase"]
 
@@ -89,8 +89,8 @@ def aggregate_by_message(rows: list[dict]) -> list[dict]:
                 d["magyar_positions"].append(row["frame_position"])
 
     msg_rows = []
-    for mid in sorted(msg_data.keys()):
-        d = msg_data[mid]
+    for mid in sorted(donnees_msg.keys()):
+        d = donnees_msg[mid]
         total_frames = len(d["frames"])
         n_faces = len(d["faces"])
         frames_w_magyar = len(d["frames_with_magyar"])
@@ -131,13 +131,13 @@ def aggregate_by_message(rows: list[dict]) -> list[dict]:
     return msg_rows
 
 
-def aggregate_by_phase(msg_rows: list[dict]) -> list[dict]:
+def agreger_par_phase(msg_rows: list[dict]) -> list[dict]:
     """Agrège les lignes per-message en une ligne par phase.
 
-    Entrée : msg_rows — sortie de aggregate_by_message
+    Entrée : msg_rows — sortie de agreger_par_message
     Sortie : liste de dicts (1 ligne par phase, triée par nom de phase)
     """
-    phase_data = defaultdict(lambda: {
+    donnees_phase = defaultdict(lambda: {
         "n_messages": 0,
         "n_messages_with_magyar": 0,
         "pct_frames_magyar": [],
@@ -151,7 +151,7 @@ def aggregate_by_phase(msg_rows: list[dict]) -> list[dict]:
         phase = row["phase"]
         if not phase:
             continue
-        pd = phase_data[phase]
+        pd = donnees_phase[phase]
         pd["n_messages"] += 1
         if row["frames_with_magyar"] > 0:
             pd["n_messages_with_magyar"] += 1
@@ -163,8 +163,8 @@ def aggregate_by_phase(msg_rows: list[dict]) -> list[dict]:
             pd["magyar_positions"].append(row["magyar_avg_position"])
 
     phase_rows = []
-    for phase in sorted(phase_data.keys()):
-        pd = phase_data[phase]
+    for phase in sorted(donnees_phase.keys()):
+        pd = donnees_phase[phase]
         n = pd["n_messages"]
         phase_rows.append({
             "phase": phase,
@@ -193,10 +193,10 @@ def aggregate_by_phase(msg_rows: list[dict]) -> list[dict]:
     return phase_rows
 
 
-def plot_monthly(msg_rows: list[dict], cfg: dict, output_dir: Path, log):
+def tracer_mensuel(msg_rows: list[dict], cfg: dict, output_dir: Path, log):
     """Trace deux courbes mensuelles : % frames Magyar + nb individus non-Magyar.
 
-    Entrée : msg_rows — sortie de aggregate_by_message, cfg — dict config,
+    Entrée : msg_rows — sortie de agreger_par_message, cfg — dict config,
              output_dir — Path de sortie, log — logger
     Sortie : None (écrit magyar_monthly.png dans output_dir)
     """
@@ -300,7 +300,7 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config) if args.config else load_config()
-    log = setup_logging("insightface", cfg=cfg)
+    log = init_logger("insightface", cfg=cfg)
 
     csv_path = Path(args.csv)
     output_dir = Path(args.output_dir)
@@ -320,7 +320,7 @@ def main():
         sys.exit(1)
 
     # ── Agregation par message ──
-    msg_rows = aggregate_by_message(rows)
+    msg_rows = agreger_par_message(rows)
 
     agg_msg_path = output_dir / "magyar_aggregated.csv"
     agg_fields = [
@@ -336,7 +336,7 @@ def main():
     log.info(f"CSV agrege par message : {agg_msg_path} ({len(msg_rows)} msgs)")
 
     # ── Agregation par phase ──
-    phase_rows = aggregate_by_phase(msg_rows)
+    phase_rows = agreger_par_phase(msg_rows)
 
     phase_path = output_dir / "magyar_by_phase.csv"
     phase_fields = [
@@ -363,7 +363,7 @@ def main():
         )
 
     # ── Graphique mensuel ──
-    plot_monthly(msg_rows, cfg, output_dir, log)
+    tracer_mensuel(msg_rows, cfg, output_dir, log)
 
 
 if __name__ == "__main__":

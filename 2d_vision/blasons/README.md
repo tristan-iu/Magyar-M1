@@ -1,4 +1,4 @@
-# blasons/ — Détection des logos de brigade
+# 2d_vision/blasons — Détection des logos de brigade
 
 Détecte la présence des blasons/logos de la brigade 414 OBr ("Птахи Мадяра")
 en watermark dans les keyframes du corpus. Signal complémentaire à l'OCR du
@@ -14,36 +14,21 @@ pip install -r requirements.txt
 SIFT est disponible dans `opencv-python` depuis la version 4.4.0 (expiration
 du brevet Lowe en mars 2020).
 
-## Usage
+## Utilisation
 
 ```bash
-# Corpus complet (défaut)
-python detect_blasons.py \
-  --input  /chemin/messages_faces.jsonl \
-  --output /chemin/messages_blasons.jsonl
-
-# Test sur quelques messages connus
-python detect_blasons.py --ids 908 1080 1325 --overwrite
-
-# Ajuster le seuil (voir section Méthodologie)
-python detect_blasons.py --match-threshold 20 --overwrite
+# Corpus complet (défauts : --input jsonl_clean de config.yaml, --output messages_blasons.jsonl)
+python detect_blasons.py
+#   --ids 908 1080 1325     messages spécifiques (test)
+#   --limit N               N messages max
+#   --overwrite             retraite les messages déjà faits
+#   --match-threshold 15    seuil inliers RANSAC (voir Méthodologie)
+#   --ratio 0.75            ratio test de Lowe
+#   --roi-pct 0.30          taille des ROI (fraction de l'image)
+#   --rois haut_droite bas_droite   coins à scanner
+#   --refs-dir references/  dossier des crops de référence
+#   --csv results/blason_detection.csv   CSV per-frame
 ```
-
-## Options CLI
-
-| Argument | Défaut | Description |
-|----------|--------|-------------|
-| `--input` | config `jsonl_faces` | JSONL source |
-| `--output` | `messages_blasons.jsonl` | JSONL enrichi |
-| `--refs-dir` | `references/` | Dossier des crops de référence |
-| `--match-threshold` | **15** | Seuil inliers RANSAC (voir Méthodologie) |
-| `--ratio` | 0.75 | Ratio test de Lowe |
-| `--roi-pct` | 0.30 | Taille des ROI en fraction de l'image |
-| `--rois` | `haut_droite bas_droite` | Coins à scanner |
-| `--csv` | `results/blason_detection.csv` | CSV per-frame |
-| `--limit` | aucune | N messages max |
-| `--ids` | tous | Message IDs spécifiques |
-| `--overwrite` | false | Retraiter les messages déjà faits |
 
 ## Champs JSONL produits
 
@@ -51,7 +36,7 @@ python detect_blasons.py --match-threshold 20 --overwrite
 |-------|------|-------------|
 | `blason_present` | bool | Blason détecté dans au moins une keyframe |
 | `blason_detecte` | str | Catégorie dominante (`414_obr` / `414_mono` / `pm_SARG`) |
-| `blason_roi` | str | Coin où le blason est le plus souvent détecté |
+| `blason_zone` | str | Coin où le blason est le plus souvent détecté (`haut_droite`, `bas_droite`…) |
 
 ## Références
 
@@ -132,6 +117,6 @@ compilations courtes fortement compressées).
 
 - `results/blason_detection.csv` — une ligne par keyframe analysée
   (`message_id, keyframe, frame_position, blason_present, n_inliers,
-  blason_detecte, blason_roi`)
+  blason_detecte, blason_zone`)
 - JSONL enrichi — 3 champs par message
 - Fiches individuelles mises à jour (`fiches/robert_magyar_{id}_fiche.json`)
