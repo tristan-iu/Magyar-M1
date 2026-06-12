@@ -1,37 +1,44 @@
 # Dépôt M1 SDHC 
 Ensemble du code utilisé dans le cadre du mémoire de M1 SDHC. 
 
-Le corpus porte sur les publications de la chaîne Telegram du commandant de drones ukrainien Robert « *Magyar* » Brovdi ([@robert_magyar](https://t.me/robert_magyar)), de septembre 2022 à septembre 2025. Le corpus n'est pas inclus, mais la chaîne est publique et le code est reproductible.
+Le corpus porte sur les publications de la chaîne Telegram du commandant de drones ukrainien Robert « *Madyar* » Brovdi ([@robert_magyar](https://t.me/robert_magyar)), de septembre 2022 à septembre 2025 — 1365 messages couvrant trois phases de production (artisanale, semi-professionnelle, institutionnelle). Le corpus n'est pas inclus dans le dépôt (**disponible sur demande**) ; la chaîne est publique et la collecte reproductible. Le scraper fonctionne sur n'importe quelle chaîne Telegram ; les analyses en aval, développées pour ce corpus en particulier, ne sont pas garanties ailleurs.
 
 ## Structure du dépôt
 
 ```
 ├── 0_config/            Configuration centrale (config.yaml, utils.py)
 ├── 1a_scraper/          Collecte Telegram via l'API officielle et la bibliothèque Telethon 
-├── 2a_metadonnees/      Métadonnées techniques via ffprobe (résolution, durée, codec…)
+├── 2a_metadonnees/      Métadonnées techniques via ffprobe (résolution, durée, bitrate…)
 ├── 2b_transcription/    Transcription via Whisper 
 ├── 2c_traduction/       Traduction des .srt de l'ukrainien au français (DeepL / LM Studio)
 ├── 2d_vision/           Keyframes, OCR cyrillique, SceneDetect, InsightFace, CLIP, blasons
 │   ├── keyframes/             Extraction keyframes + détection de scènes
 │   │   ├── keyframer.py           Pipeline keyframes fixes (ffmpeg, 1/10s) + OCR + SceneDetect
 │   │   └── scene_detect.py        Détection de scènes standalone (HistogramDetector fallback)
-│   ├── faces/                 Détection des visages via InsightFace 
+│   ├── visages/               Détection des visages via InsightFace 
 │   ├── clip/                  Classification zero-shot via CLIP
 │   └── blasons/               Détection logos de brigade via SIFT & RANSAC
-├── 3a_lexicometrie/     Analyse textuelle (lemmatisation, TF-IDF...)
+├── 3a_lexicometrie/     Analyse textuelle (lemmatisation spaCy, TF-IDF, spécificités, LDA, AFC, CAH)
+├── 3b_stats_R/          Analyses quantitatives et figures du mémoire (R + ggplot2)
+├── 3c_reseaux/          Réseaux lexicaux de cooccurrences PMI (igraph, exports Gephi)
+└── 3d_couleurs/         Analyse colorimétrique HSV des keyframes (entropie, PCA, similarité)
 ```
 
 La numérotation correspond à l'ordre d'exécution : (1) collecte, (2) enrichissement, (3) analyse. Le scraper produit un JSONL de base ; les étapes suivantes enrichissent incrémentalement ce fichier avec de nouveaux champs.
 
 ## Configuration
 
-Copier le template et adapter les chemins locaux. `0_config/config.example.yaml` documente la structure complète.
+Copier le template et adapter les chemins locaux (`paths.*`). `0_config/config.example.yaml` documente la structure complète.
+
+```bash
+cp 0_config/config.example.yaml 0_config/config.yaml
+```
 
 ## Utilisation
 
-Se référer au README de chaque module. Tous les scripts sont paramétrables via CLI, type :
+Se référer au README de chaque module. Tous les scripts sont paramétrables via CLI, du type :
 ```bash
-python3 script.py --input corpus.jsonl --output corpus_enriched.jsonl
+python3 script.py --input corpus.jsonl --output corpus_enrichi.jsonl
 ```
 
 L'utilisation sur d'autres chaînes Telegram n'est pas garantie, en particulier pour les langues autres que l'ukrainien (modifier le prompt Whisper, les modèles spaCy et OCR). 
@@ -50,4 +57,8 @@ Les modules qui nécessitent une clé API (scraper Telegram, traduction DeepL) l
 
 ## Usage IA
 
-Les scripts ont été développés avec l'assistance de Claude Code (Opus 4.6). Chacun a été relu, commenté et testé manuellement.
+Les scripts ont été développés avec l'assistance de Claude Code (Anthropic, versions Sonnet 4.5-6/Opus 4.5-6, novembre 2025 à juin 2026) sur des tâches d'implémentation technique (écriture et debug de code Python et R, refactorisations). Chacun a été relu, commenté et testé manuellement ; les décisions méthodologiques (choix d'outils, seuils, périodisation) relèvent de l'auteur.
+
+## Licence
+
+Code sous licence [MIT](LICENSE). Le corpus (textes, médias, transcriptions) n'est pas couvert par cette licence et n'est pas redistribué.

@@ -1,8 +1,11 @@
 # ============================================================
 # requirements.txt — Magyar pipeline (racine du projet)
-# Couvre tous les scripts : 1a_scraper, 2a_audio, 2b_technique,
-#                           2c_vision, 2c_vision/faces, 2c_vision/clip,
-#                           2d_traduction, 3a_lexicometrie, 0_config
+# Couvre tous les modules : 1a_scraper, 2a_metadonnees, 2b_transcription,
+#   2c_traduction, 2d_vision/{keyframes,visages,clip,blasons},
+#   3a_lexicometrie, 3d_couleurs, 0_config.
+# Chaque module a aussi son requirements.txt minimal.
+# Exception : 2b_transcription/audio_segmentation.py demande un venv
+# séparé (inaSpeechSegmenter + TensorFlow) — voir son README.
 #
 # Dependance systeme (hors pip) :
 #   sudo apt install ffmpeg
@@ -19,25 +22,25 @@ telethon>=1.34.0
 python-socks[asyncio]>=2.4.0
 imagehash>=4.3.0
 
-# --- 2a_audio (Whisper + VAD) ---
+# --- 2b_transcription (Whisper + VAD) ---
 openai-whisper
 torch>=2.0
 torchaudio
 torchcodec  # requis par torchaudio >= 2.9 pour la lecture audio (Silero VAD)
 
-# --- 2c_vision (OCR, SceneDetect, keyframes) ---
+# --- 2d_vision/keyframes (OCR, SceneDetect) ---
 easyocr>=1.7
 scenedetect[opencv]>=0.6
 
-# --- 2c_vision/clip (CLIP classify) ---
+# --- 2d_vision/clip (CLIP classify) ---
 transformers>=4.30
 seaborn>=0.12
 
-# --- 2c_vision/faces (InsightFace) ---
+# --- 2d_vision/visages (InsightFace) ---
 insightface>=0.7
 onnxruntime-gpu>=1.16
 
-# --- 2d_traduction ---
+# --- 2c_traduction ---
 deepl
 
 # --- 3a_lexicometrie ---
@@ -47,6 +50,8 @@ scikit-learn
 statsmodels>=0.14
 gensim>=4.3
 pyLDAvis>=3.4
+prince           # AFC (afc.py)
+networkx         # réseaux de cooccurrences (cooccurrences.py)
 
 # --- Partagees (plusieurs scripts) ---
 opencv-python>=4.8.0
