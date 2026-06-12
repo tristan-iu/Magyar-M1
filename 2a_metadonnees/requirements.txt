@@ -1,2 +1,2 @@
-# ffprobe_batch.py — aucune dépendance Python externe
-# Dépendance système : ffmpeg (sudo apt install ffmpeg)
+# ffprobe_batch.py — dépendance système : ffmpeg (sudo apt install ffmpeg)
+pyyaml>=6.0  # requis par 0_config/utils.py (load_config)

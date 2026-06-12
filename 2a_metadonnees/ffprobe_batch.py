@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """
 Enrichissement technique du corpus via ffprobe.
-Extrait les métadonnées (durée, résolution, codec, bitrate, fps, audio)
+Extrait les métadonnées (durée, résolution, bitrate, fps, audio)
 de chaque fichier média et les ajoute au JSONL.
 
+Champs produits : duree, largeur, hauteur, orientation, fps,
+video_bitrate, audio_present, fichier_taille.
+
 Pipeline :
-  1. Filtrage — messages avec media_path non traités
+  1. Filtrage — messages avec media_chemin non traités
   2. ffprobe — extraction JSON brut (timeout 10s)
   3. Parsing — normalisation en champs JSONL (vidéo / photo / audio)
   4. Écriture — enrichissement JSONL + fiche individuelle
 
-Options CLI : --input, --output, --media-dir, --limit, --overwrite, --ids
+Options CLI : --input, --output, --media-dir, --limit, --overwrite, --ids,
+              --start-date, --end-date, --config
 
 Dépendance unique : ffprobe (installé avec ffmpeg).
 """
@@ -24,20 +28,20 @@ from pathlib import Path
 _UTILS_DIR = Path(__file__).resolve().parents[1] / "0_config"
 sys.path.insert(0, str(_UTILS_DIR))
 from utils import (  # noqa: E402
-    build_base_parser,
+    creer_parser_base,
     load_config,
-    setup_logging,
+    init_logger,
     read_jsonl,
     write_jsonl,
-    update_fiche,
-    filter_eligible,
-    ProgressTracker,
+    mettre_a_jour_fiche,
+    filtrer_eligibles,
+    SuiviProgression,
 )
 
 
 # ── ffprobe ──────────────────────────────────────────────────────────────────
 
-def run_ffprobe(file_path: str, timeout: int = 10) -> dict | None:
+def executer_ffprobe(file_path: str, timeout: int = 10) -> dict | None:
     """Lance ffprobe en mode JSON et retourne le dict brut.
 
     Entrée : file_path — chemin vers le fichier média, timeout — secondes avant abandon
@@ -60,7 +64,7 @@ def run_ffprobe(file_path: str, timeout: int = 10) -> dict | None:
         return None
 
 
-def orientation_label(w: int, h: int) -> str:
+def etiquette_orientation(w: int, h: int) -> str:
     """Retourne l'orientation à partir des dimensions.
 
     Entrée : w — largeur en pixels, h — hauteur en pixels
@@ -70,7 +74,8 @@ def orientation_label(w: int, h: int) -> str:
         return "vertical"
     if w > h:
         return "horizontal"
-    return "square"
+    if w == h:
+        return "square"
 
 
 def parse_fps(stream: dict) -> float | None:
@@ -90,15 +95,15 @@ def parse_fps(stream: dict) -> float | None:
     return None
 
 
-def extract_metadata(probe: dict) -> dict:
+def extraire_metadonnees(probe: dict) -> dict:
     """Parse la sortie ffprobe et retourne les champs à ajouter au JSONL.
 
     Gère trois cas :
-    - Image (codec photo sans audio) → file_size seulement
-    - Vidéo → duration, codecs, bitrate, fps, has_audio, file_size
-    - Audio seul → duration, audio_codec, file_size
+    - Image (codec photo sans audio) → largeur, hauteur, orientation, fichier_taille
+    - Vidéo → duree, largeur, hauteur, orientation, video_bitrate, fps, audio_present, fichier_taille
+    - Audio seul → duree, audio_present, fichier_taille
 
-    Entrée : probe — dict brut retourné par run_ffprobe()
+    Entrée : probe — dict brut retourné par executer_ffprobe()
     Sortie : dict des champs à ajouter au message (vide si aucun stream exploitable)
     """
     streams = probe.get("streams", [])
@@ -117,11 +122,11 @@ def extract_metadata(probe: dict) -> dict:
             audio_stream = s
 
     # Taille du fichier
-    file_size = None
+    fichier_taille = None
     raw_size = fmt.get("size")
     if raw_size is not None:
         try:
-            file_size = int(raw_size)
+            fichier_taille = int(raw_size)
         except (ValueError, TypeError):
             pass
 
@@ -135,8 +140,14 @@ def extract_metadata(probe: dict) -> dict:
 
     if is_image:
         result = {}
-        if file_size is not None:
-            result["file_size"] = file_size
+        w = int(video_stream.get("width", 0))
+        h = int(video_stream.get("height", 0))
+        if w > 0 and h > 0:
+            result["largeur"] = w
+            result["hauteur"] = h
+            result["orientation"] = etiquette_orientation(w, h)
+        if fichier_taille is not None:
+            result["fichier_taille"] = fichier_taille
         return result
 
     # ── Vidéo ──
@@ -145,11 +156,11 @@ def extract_metadata(probe: dict) -> dict:
         h = int(video_stream.get("height", 0))
 
         # Durée : préférer format.duration, fallback sur stream
-        duration = None
+        duree = None
         for src in (fmt.get("duration"), video_stream.get("duration")):
             if src is not None:
                 try:
-                    duration = round(float(src), 2)
+                    duree = round(float(src), 2)
                     break
                 except (ValueError, TypeError):
                     pass
@@ -164,36 +175,37 @@ def extract_metadata(probe: dict) -> dict:
                 pass
 
         result = {}
-        if duration is not None:
-            result["duration"] = duration
-        result["video_codec"] = video_stream.get("codec_name")
+        if duree is not None:
+            result["duree"] = duree
+        if w > 0 and h > 0:
+            result["largeur"] = w
+            result["hauteur"] = h
+            result["orientation"] = etiquette_orientation(w, h)
         if video_bitrate is not None:
             result["video_bitrate"] = video_bitrate
         result["fps"] = parse_fps(video_stream)
-        result["has_audio"] = audio_stream is not None
-        result["audio_codec"] = audio_stream.get("codec_name") if audio_stream else None
-        if file_size is not None:
-            result["file_size"] = file_size
+        result["audio_present"] = audio_stream is not None
+        if fichier_taille is not None:
+            result["fichier_taille"] = fichier_taille
 
         return result
 
     # ── Audio seul (pas de stream vidéo) ──
     if audio_stream is not None:
-        duration = None
+        duree = None
         for src in (fmt.get("duration"), audio_stream.get("duration")):
             if src is not None:
                 try:
-                    duration = round(float(src), 2)
+                    duree = round(float(src), 2)
                     break
                 except (ValueError, TypeError):
                     pass
         result = {}
-        if duration is not None:
-            result["duration"] = duration
-        result["has_audio"] = True
-        result["audio_codec"] = audio_stream.get("codec_name")
-        if file_size is not None:
-            result["file_size"] = file_size
+        if duree is not None:
+            result["duree"] = duree
+        result["audio_present"] = True
+        if fichier_taille is not None:
+            result["fichier_taille"] = fichier_taille
         return result
 
     return {}
@@ -202,14 +214,14 @@ def extract_metadata(probe: dict) -> dict:
 # ── Batch ────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = build_base_parser(
+    parser = creer_parser_base(
         "Enrichissement technique via ffprobe",
         has_media_dir=True,
     )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    log = setup_logging("ffprobe", cfg=cfg)
+    log = init_logger("ffprobe", cfg=cfg)
     save_every = 50
 
     input_path = Path(args.input).resolve()
@@ -233,97 +245,91 @@ def main():
     log.info(f"Corpus : {total} messages")
 
     # ── Filtrage ──
-    ids_filter = set(args.ids) if args.ids else None
-    eligible = filter_eligible(
+    filtre_ids = set(args.ids) if args.ids else None
+    eligibles = filtrer_eligibles(
         messages,
-        ids_filter=ids_filter,
-        check_fields=["duration", "file_size"],
+        filtre_ids=filtre_ids,
+        champs_a_verifier=["duree", "fichier_taille"],
         overwrite=args.overwrite,
         limit=args.limit,
         start_date=args.start_date,
         end_date=args.end_date,
     )
 
-    # Filtrer davantage : il faut un media_path
-    eligible = [i for i in eligible if messages[i].get("media_path")]
+    # Filtrer davantage : il faut un media_chemin
+    eligibles = [i for i in eligibles if messages[i].get("media_chemin")]
 
-    n_eligible = len(eligible)
-    log.info(f"Messages éligibles : {n_eligible}")
+    n_eligibles = len(eligibles)
+    log.info(f"Messages éligibles : {n_eligibles}")
 
-    if n_eligible == 0:
+    if n_eligibles == 0:
         log.info("Rien à faire.")
         if input_path != output_path:
             write_jsonl(messages, output_path)
         return
 
-    tracker = ProgressTracker(n_eligible, label="ffprobe")
-    processed = 0
-    errors = 0
+    tracker = SuiviProgression(n_eligibles, label="ffprobe")
+    n_traites = 0
+    n_erreurs = 0
 
     try:
-        for rank, idx in enumerate(eligible):
+        for rank, idx in enumerate(eligibles):
             msg = messages[idx]
             mid = msg.get("message_id", "?")
-            media_path_rel = msg.get("media_path")
+            media_path_rel = msg.get("media_chemin")
 
-            media_file = media_dir / media_path_rel
+            fichier_media = media_dir / media_path_rel
             basename = os.path.basename(media_path_rel)
 
-            if not media_file.is_file():
+            if not fichier_media.is_file():
                 log.warning(f"msg {mid}\t{media_path_rel}\tfichier manquant")
-                errors += 1
-                tracker.tick(rank, mid, "fichier manquant ✗")
+                n_erreurs += 1
+                tracker.avancer(rank, mid, "fichier manquant ✗")
                 continue
 
             # ffprobe
-            probe = run_ffprobe(str(media_file))
+            probe = executer_ffprobe(str(fichier_media))
             if probe is None:
                 log.warning(f"msg {mid}\t{media_path_rel}\tffprobe échoué")
-                errors += 1
-                tracker.tick(rank, mid, "ffprobe échoué ✗")
+                n_erreurs += 1
+                tracker.avancer(rank, mid, "ffprobe échoué ✗")
                 continue
 
-            meta = extract_metadata(probe)
+            meta = extraire_metadonnees(probe)
             if not meta:
                 log.warning(f"msg {mid}\t{media_path_rel}\taucun stream exploitable")
-                errors += 1
-                tracker.tick(rank, mid, "aucun stream ✗")
+                n_erreurs += 1
+                tracker.avancer(rank, mid, "aucun stream ✗")
                 continue
 
             # Enrichir le message
             msg.update(meta)
-            dims = msg.get("media_dimensions")
-            if dims and len(dims) == 2:
-                msg["orientation"] = orientation_label(dims[0], dims[1])
-                meta["orientation"] = msg["orientation"]
-            processed += 1
+            n_traites += 1
 
             # Fiche individuelle
-            update_fiche(msg, meta, media_dir / "fiches", overwrite=args.overwrite)
+            mettre_a_jour_fiche(msg, meta, media_dir / "fiches", overwrite=args.overwrite)
 
             # Progression
-            desc_parts = []
-            if "duration" in meta:
-                desc_parts.append(f"{meta['duration']}s")
-            if dims and len(dims) == 2:
-                desc_parts.append(f"{dims[0]}x{dims[1]}")
-            if "video_codec" in meta:
-                desc_parts.append(meta["video_codec"])
-            if meta.get("audio_codec"):
-                desc_parts.append(meta["audio_codec"])
-            tracker.tick(rank, mid, ", ".join(desc_parts) + " ✓")
+            parties_desc = []
+            if "duree" in meta:
+                parties_desc.append(f"{meta['duree']}s")
+            if "largeur" in meta and "hauteur" in meta:
+                parties_desc.append(f"{meta['largeur']}x{meta['hauteur']}")
+            if meta.get("audio_present"):
+                parties_desc.append("audio")
+            tracker.avancer(rank, mid, ", ".join(parties_desc) + " ✓")
 
             # Sauvegarde intermédiaire tous les save_every messages
-            if processed % save_every == 0:
+            if n_traites % save_every == 0:
                 write_jsonl(messages, output_path)
-                log.info(f"  Sauvegarde intermédiaire ({processed} traités)")
+                log.info(f"  Sauvegarde intermédiaire ({n_traites} traités)")
 
     except KeyboardInterrupt:
         log.info("\nInterruption clavier — sauvegarde en cours...")
     finally:
         write_jsonl(messages, output_path)
 
-    tracker.summary(errors=errors, skipped=n_eligible - processed - errors)
+    tracker.resumer(errors=n_erreurs, skipped=n_eligibles - n_traites - n_erreurs)
 
 
 if __name__ == "__main__":
