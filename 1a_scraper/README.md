@@ -76,22 +76,6 @@ output/
 }
 ```
 
-## Liens externes — entités Telegram
-
-Le champ `liens_externes` capture les liens que le texte brut de la légende ne
-contient pas. Telegram stocke les URL « inline » (texte cliquable dont l'URL
-n'apparaît pas dans la légende) dans les entités du message
-(`MessageEntityTextUrl` / `MessageEntityUrl`), pas dans le texte brut. Le scraper
-les extrait à la volée via `extraire_liens_externes()` :
-
-- `MessageEntityTextUrl` → lien inline : `texte` = ancre affichée (ex. « Twitter »)
-- `MessageEntityUrl` → URL brute déjà visible dans `legende` : `texte` = `null`
-- `[]` = message sans lien
-
-Les offsets d'entités sont décodés en UTF-16LE pour corriger le décalage causé par
-les emojis du plan astral (🇺🇦, 🏦…) qui précèdent souvent les URL : Telegram compte
-les offsets en code units UTF-16, alors que Python indexe en code points.
-
 ## Méthodologie
 
 **Ordre chronologique :** on itère du plus ancien au plus récent (`reverse=True` dans Telethon) pour que le JSONL reflète l'ordre de publication du canal. Essentiel pour les analyses longitudinales, vu que la ligne N précède toujours la ligne N+1 temporellement.
@@ -103,3 +87,5 @@ les offsets en code units UTF-16, alors que Python indexe en code points.
 **Idempotence :** au démarrage, le script charge les IDs déjà présents dans le JSONL et les skip. On peut relancer après une interruption sans rescraper.
 
 **Hashing :** deux empreintes complémentaires. MD5 (déduplication exacte bit à bit) et pHash perceptuel (déduplication visuelle même après recompression Telegram). Le pHash est calculé sur la frame à t=1s pour les vidéos, pas la première frame (souvent noire).
+
+**Liens externes :** le texte brut d'une légende ne contient pas les liens « inline » (texte cliquable dont l'URL est masquée). Le scraper les récupère depuis les entités Telegram du message : `MessageEntityTextUrl` fournit l'URL cachée et son ancre affichée (champ `texte`), `MessageEntityUrl` une URL écrite en clair dans la légende (`texte` à `null`). Telegram compte les offsets d'entités en code units UTF-16 alors que Python indexe en code points : chaque emoji précédant une URL décale l'extraction d'un caractère. Les offsets sont donc appliqués sur le texte encodé en UTF-16LE avant décodage, ce qui corrige le décalage.

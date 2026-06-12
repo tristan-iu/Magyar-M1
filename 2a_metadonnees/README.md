@@ -1,21 +1,15 @@
-# 2a_metadonnees — Métadonnées ffprobe
+# Métadonnées ffprobe
 
-Extraction batch des métadonnées techniques (durée, résolution, bitrate, fps, audio)
-de chaque fichier média du corpus via `ffprobe`. Première étape du pipeline (E1), prérequis
-pour Whisper (durée) et les analyses de forme.
+Extraction batch des métadonnées techniques (durée, résolution, bitrate, fps, présence audio) de chaque fichier média du corpus via `ffprobe`. Première étape du pipeline d'enrichissement, prérequis pour la transcription (durée, audio) et pour les analyses de forme.
 
-## Dépendances
+## Installation
 
 ```bash
 sudo apt install ffmpeg
-```
-
-Seule dépendance Python : `pyyaml` (via la bibliothèque partagée `0_config/utils.py`) —
-le traitement lui-même est en stdlib pure.
-
-```bash
 pip install -r requirements.txt
 ```
+
+Le traitement lui-même est en stdlib pure : la seule dépendance Python (`pyyaml`) vient de la bibliothèque partagée `0_config/utils.py`.
 
 ## Utilisation
 
@@ -30,47 +24,33 @@ python ffprobe_batch.py --input messages.jsonl --output messages_ffprobe.jsonl
 #   --config CHEMIN            config.yaml (défaut : 0_config/config.yaml)
 ```
 
-## Input / Output
+## Output
 
-**Lit :** JSONL avec champ `media_chemin` (chemin relatif vers le fichier)
-**Produit :** même JSONL + champs ci-dessous
+Le script lit un JSONL dont les messages portent un `media_chemin` relatif, et produit le même JSONL enrichi des champs ci-dessous, plus les fiches individuelles mises à jour. Le batch ne s'interrompt jamais : fichier manquant, timeout ou stream vide sont skippés avec un warning, et les erreurs sont loguées dans `logs/`.
 
-**Champs ajoutés :**
+### Champs ajoutés au JSONL
 
 | Champ | Type | Description |
 |-------|------|-------------|
 | `duree` | `float` | Durée en secondes |
-| `largeur` | `int` | Largeur vidéo en pixels |
-| `hauteur` | `int` | Hauteur vidéo en pixels |
-| `orientation` | `str` | `"vertical"` \| `"horizontal"` \| `"square"` (calculé depuis largeur/hauteur) |
+| `largeur` | `int` | Largeur en pixels |
+| `hauteur` | `int` | Hauteur en pixels |
+| `orientation` | `str` | `"vertical"`, `"horizontal"` ou `"square"` (calculé depuis largeur/hauteur) |
 | `video_bitrate` | `int` | Bitrate vidéo en kbps |
 | `fps` | `float` | Images par seconde |
 | `audio_present` | `bool` | Présence d'une piste audio |
 | `fichier_taille` | `int` | Taille du fichier en octets |
 
-Codecs vidéo/audio droppés (zéro variance dans le corpus). Photos : `fichier_taille`,
-`largeur`, `hauteur`, `orientation` uniquement. Audio seul : `duree`, `audio_present`, `fichier_taille`.
-
-Les erreurs sont loguées dans `logs/ffprobe_errors.log`. Le batch ne s'interrompt jamais :
-fichier manquant, timeout (10s) ou stream vide sont skip avec un warning.
+Les photos ne reçoivent que `largeur`, `hauteur`, `orientation` et `fichier_taille` ; les fichiers audio seuls reçoivent `duree`, `audio_present` et `fichier_taille`.
 
 ## Méthodologie
 
-**ffprobe plutôt que mediainfo ou mutagen :** ffprobe est déjà une dépendance du pipeline
-(ffmpeg sert pour Whisper et l'extraction de keyframes). Pas de dépendance Python supplémentaire,
-et la sortie JSON est stable entre versions.
+**ffprobe plutôt que mediainfo ou mutagen :** ffprobe est déjà une dépendance du pipeline (ffmpeg sert à la transcription et à l'extraction de keyframes). Pas de dépendance Python supplémentaire, et la sortie JSON est stable entre versions.
 
-**Préférence `format.duration` > `stream.duration` :** pour les vidéos conteneurisées (MP4),
-la durée du format est plus fiable que celle du stream vidéo, qui peut être absente ou arrondie
-selon l'encodeur. Fallback sur la durée du stream si la durée format est manquante.
+**Préférence `format.duration` puis `stream.duration` :** pour les vidéos conteneurisées (MP4), la durée du format est plus fiable que celle du stream vidéo, qui peut être absente ou arrondie selon l'encodeur. Fallback sur la durée du stream si la durée format est manquante.
 
-**Timeout 10s :** ffprobe lit seulement les métadonnées (pas le contenu), donc 10s est largement
-suffisant. Au-delà, c'est un fichier corrompu ou tronqué — on skip et on log.
+**Timeout 10 s :** ffprobe lit seulement les métadonnées, pas le contenu, donc 10 secondes suffisent largement. Au-delà, c'est un fichier corrompu ou tronqué : on skip et on log.
 
-**Photos ignorées pour la plupart des champs :** ffprobe retourne des streams vidéo pour les
-images (codec `mjpeg`, `png`, etc.), mais sans durée ni audio. On détecte ce cas et on ne stocke
-que `fichier_taille` (+ largeur/hauteur/orientation) pour éviter des champs `duree=null` parasites dans le JSONL.
+**Cas des photos :** ffprobe retourne des streams vidéo pour les images (codec `mjpeg`, `png`, etc.), mais sans durée ni audio. Ce cas est détecté pour ne stocker que les dimensions et la taille, et éviter des champs `duree=null` parasites dans le JSONL.
 
-**`orientation` calculé ici plutôt qu'au scrape :** les dimensions Telegram (API) peuvent
-différer de celles du fichier réel après recompression. On calcule l'orientation sur les
-dimensions ffprobe, plus fiables.
+**`orientation` calculé ici plutôt qu'au scrape :** les dimensions renvoyées par l'API Telegram peuvent différer de celles du fichier réel après recompression. L'orientation est calculée sur les dimensions ffprobe, plus fiables.

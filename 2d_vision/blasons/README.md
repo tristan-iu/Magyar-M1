@@ -1,18 +1,16 @@
-# 2d_vision/blasons — Détection des logos de brigade
+# Détection des blasons de brigade (SIFT et RANSAC)
 
-Détecte la présence des blasons/logos de la brigade 414 OBr ("Птахи Мадяра")
-en watermark dans les keyframes du corpus. Signal complémentaire à l'OCR du
-texte "414 ОБр" — le logo précède ou accompagne le texte, et résiste mieux
-à la compression vidéo.
+Détecte la présence des blasons de la brigade 414 OBr (« Птахи Мадяра ») en watermark dans les keyframes du corpus. Signal complémentaire à l'OCR du texte « 414 ОБр » : le logo précède ou accompagne le texte, et résiste mieux à la compression vidéo.
 
-## Dépendances
+## Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-SIFT est disponible dans `opencv-python` depuis la version 4.4.0 (expiration
-du brevet Lowe en mars 2020).
+SIFT est inclus dans `opencv-python` depuis la version 4.4.0 (expiration du brevet Lowe en mars 2020).
+
+Prérequis : placer des crops PNG ou JPG du blason seul (bien cadré, fond minimal) dans des sous-dossiers de `references/`, un sous-dossier par catégorie de logo (par exemple `414_obr/` pour le blason couleur, `414_mono/` pour la variante monochrome). Compter 5 à 10 crops par catégorie, issus de vraies frames vidéo plutôt que de renders officiels, en couvrant les variantes de taille (480p à 1080p) et de contraste du corpus. Ce dossier n'est pas versionné.
 
 ## Utilisation
 
@@ -30,93 +28,28 @@ python detect_blasons.py
 #   --csv results/blason_detection.csv   CSV per-frame
 ```
 
-## Champs JSONL produits
+L'idempotence est double : les `message_id` déjà présents dans le CSV sont skippés et le champ `blason_present` du JSONL est vérifié. Sauvegarde intermédiaire tous les 50 messages.
+
+## Output
+
+Le script écrit `results/blason_detection.csv`, une ligne par keyframe analysée (`message_id, keyframe, frame_position, blason_present, n_inliers, blason_detecte, blason_zone`), et enrichit le JSONL et les fiches individuelles des trois champs ci-dessous.
+
+### Champs ajoutés au JSONL
 
 | Champ | Type | Description |
 |-------|------|-------------|
 | `blason_present` | bool | Blason détecté dans au moins une keyframe |
-| `blason_detecte` | str | Catégorie dominante (`414_obr` / `414_mono` / `pm_SARG`) |
-| `blason_zone` | str | Coin où le blason est le plus souvent détecté (`haut_droite`, `bas_droite`…) |
+| `blason_detecte` | str | Catégorie dominante (nom du sous-dossier de référence), `null` sinon |
+| `blason_zone` | str | Coin où le blason est le plus souvent détecté (`haut_droite`, `bas_droite`...), `null` sinon |
 
-## Références
+## Méthodologie
 
-Placer des crops PNG/JPG du blason **seul** (bien cadré, fond minimal)
-dans des sous-dossiers de `references/` — un sous-dossier par catégorie :
+**Régions d'intérêt :** pour chaque keyframe, la recherche se limite aux coins de l'image (30 % de la largeur et de la hauteur), où les logos de brigade apparaissent systématiquement en watermark. Pour les photos, l'image entière est testée en plus des coins, le blason pouvant s'y trouver n'importe où.
 
-```
-references/
-├── 414_obr/     # blason couleur teal, "414 ОБр"
-├── 414_mono/    # variante monochrome
-└── pm_SARG/     # variante "САРГ" (PM/reconn.)
-```
+**SIFT :** SIFT (*Scale-Invariant Feature Transform*, Lowe 2004) détecte des points d'intérêt locaux dans chaque ROI et les décrit par des vecteurs flottants de 128 dimensions, plus discriminants sur les détails fins (trident, texte cyrillique) que des descripteurs binaires type ORB. Son invariance d'échelle est essentielle ici : le même blason occupe environ 80 px sur une vidéo 480p et 220 px sur une 1080p.
 
-Règles pratiques : 5–10 crops par catégorie, issus de vraies frames vidéo
-(pas de renders officiels), couvrant les variantes de taille (480p–1080p)
-et de contraste.
+**Appariement et ratio test de Lowe :** les descripteurs de la ROI sont appariés à ceux de chaque référence par force brute (distance euclidienne L2). Le ratio test (seuil 0.75) écarte les appariements ambigus : un match n'est retenu que si le meilleur voisin est nettement meilleur que le second.
 
----
+**Vérification géométrique RANSAC :** l'étape clé contre les faux positifs. RANSAC estime une homographie entre les points appariés et compte les inliers, les points cohérents avec une transformation géométrique globale. Les coïncidences texturales (végétation, sol, fumée) produisent des appariements dispersés qui ne forment aucune homographie stable et sont éliminées ici.
 
-## Méthodologie — pipeline de détection
-
-### 1. Extraction des ROI
-
-Pour chaque keyframe, on extrait les régions d'intérêt dans les coins
-(30 % de la largeur et de la hauteur). Les logos de brigade apparaissent
-systématiquement en watermark de coin dans les vidéos P2–P3. Pour les
-photos, l'image entière est également testée (pas de position fixe).
-
-### 2. SIFT — extraction de points caractéristiques
-
-SIFT (*Scale-Invariant Feature Transform*, Lowe 2004) détecte des points
-d'intérêt locaux dans chaque ROI et les décrit par un vecteur de 128
-dimensions. L'invariance d'échelle est essentielle ici : le même blason
-occupe ~80 px sur une vidéo 480p et ~220 px sur une 1080p (facteur ×2,5).
-
-### 3. Appariement + ratio test de Lowe
-
-Les descripteurs de la ROI sont appariés à ceux de chaque référence via
-BFMatcher (distance euclidienne L2). Le ratio test de Lowe (seuil 0,75)
-écarte les appariements ambigus : un match n'est retenu que si le
-meilleur voisin est significativement meilleur que le second.
-
-### 4. Vérification géométrique RANSAC
-
-L'étape clé contre les faux positifs. RANSAC (*Random Sample Consensus*)
-estime une homographie entre les points appariés et compte les **inliers** :
-points dont la transformation est géométriquement cohérente avec la
-transformation globale. Les coïncidences texturales (végétation, sol,
-fumée) produisent des appariements dispersés qui ne forment aucune
-homographie stable — elles sont éliminées ici.
-
-### 5. Seuil de détection : 15 inliers
-
-Le seuil par défaut de **15 inliers RANSAC** a été calibré sur le corpus
-réel. La simulation sur l'ensemble des 1 365 messages montre :
-
-| Seuil | P1 (artisanal) | P2 (semi-pro) | P3 (institutionnel) |
-|-------|---------------|---------------|---------------------|
-| 8 | 36 % | 43 % | 75 % |
-| 12 | 11 % | 24 % | 67 % |
-| **15** | **5 %** | **16 %** | **65 %** |
-| 20 | 1 % | 13 % | 54 % |
-
-À seuil 15, le taux P1 (5 %) est cohérent avec la réalité historique :
-le branding visuel n'existe pas en P1 — les rares détections correspondent
-à des vidéos où Magyar porte un écusson sur l'uniforme en gros plan,
-ou à du bruit résiduel. La progression P1→P3 (5 %→65 %) reflète
-la montée en puissance du branding institutionnel à partir de P2
-(janvier 2024, création officielle du 414e bataillon).
-
-En dessous de 12, les faux positifs P1 explosent (textures riches en
-coins : végétation filmée en drone, tissu, équipement), trahissant une
-détection de texture et non de logo. Au-dessus de 20, P3 commence à
-perdre des détections légitimes (petits logos flous dans les
-compilations courtes fortement compressées).
-
-## Sorties
-
-- `results/blason_detection.csv` — une ligne par keyframe analysée
-  (`message_id, keyframe, frame_position, blason_present, n_inliers,
-  blason_detecte, blason_zone`)
-- JSONL enrichi — 3 champs par message
-- Fiches individuelles mises à jour (`fiches/robert_magyar_{id}_fiche.json`)
+**Seuil de détection (15 inliers) :** calibré en simulant plusieurs seuils sur l'ensemble des 1 365 messages. En dessous de 12, les faux positifs explosent sur les périodes du corpus sans branding (textures riches en coins : végétation filmée au drone, tissu, équipement), ce qui trahit une détection de texture et non de logo. Au-dessus de 20, les détections légitimes chutent sur les compilations récentes fortement compressées (petits logos flous). À 15, la détection reste rare au début du corpus, où le branding visuel n'existe pas encore, et culmine sur la période institutionnelle : la trajectoire mesurée correspond à la chronologie réelle du branding de la brigade (création officielle du 414e bataillon en janvier 2024).

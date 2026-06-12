@@ -1,91 +1,62 @@
-# 2d_vision/visages — Détection de présence Magyar (InsightFace)
+# Détection de visages (InsightFace)
 
-Détection du visage de Magyar (Robert Brovdi) dans les keyframes du corpus Telegram, pour quantifier son effacement physique entre P1 (artisanal) et P3 (institutionnel).
-
-## Pipeline
-
-```
-1. build_reference.py   Calcul embedding moyen a partir de photos de reference
-2. detect_magyar.py     Detection sur ~32K keyframes, CSV par frame + enrichissement JSONL
-3. aggregate_magyar.py  Agregation par message/phase, stats, graphique mensuel
-```
+Détecte le visage de Magyar dans les keyframes du corpus, pour quantifier son effacement physique au fil des trois années. Trois scripts : `build_reference.py` construit un embedding de référence à partir de photos, `detect_magyar.py` compare chaque visage détecté à cette référence et compte les individus distincts, `aggregate_magyar.py` agrège les résultats par message, phase et mois.
 
 ## Installation
 
 ```bash
 pip install -r requirements.txt
-# ou avec GPU :
-pip install insightface onnxruntime-gpu numpy opencv-python matplotlib tqdm
 ```
+
+Un GPU CUDA est recommandé (la détection a tourné sur ~32 000 keyframes). Pour un usage CPU seul, remplacer `onnxruntime-gpu` par `onnxruntime`.
+
+Prérequis : placer 5 à 10 photos nettes de Magyar dans `references/magyar/` (jpg, jpeg, png, webp, bmp), en variant les angles, l'éclairage et l'équipement (avec et sans casque). Ce dossier n'est pas versionné.
 
 ## Utilisation
 
-Prerequis : placer 5-10 photos nettes de Magyar dans `references/magyar/`
-(jpg/jpeg/png/webp/bmp ; varier angles, eclairage, avec/sans casque si possible).
-
 ```bash
-# 1. Embedding de reference (moyenne des photos)
+# 1. Embedding de référence (moyenne L2-normalisée des photos)
 python build_reference.py
 #   --references-dir references/magyar/    dossier source
 #   --output references/magyar_embedding.npy
 
-# 2. Detection sur les keyframes
+# 2. Détection sur les keyframes et photos du corpus
 python detect_magyar.py
 #   --limit 10          test sur 10 messages
-#   --ids 42 138 256    messages specifiques
-#   --threshold 0.35    seuil cosine (defaut 0.4, voir plus bas)
+#   --ids 42 138 256    messages spécifiques
+#   --threshold 0.35    seuil cosine (défaut 0.4, voir Méthodologie)
 #   --overwrite         retraite tout
 
-# 3. Agregation par message/phase + graphique
+# 3. Agrégation par message, phase et mois + graphique
 python aggregate_magyar.py
 ```
 
-Sorties dans `results/` :
-- `magyar_detection.csv` — une ligne par frame
-- `magyar_aggregated.csv` — une ligne par message
-- `magyar_by_phase.csv` — stats par phase
-- `magyar_monthly.png` — courbe mensuelle coloree par phase
+Relancer `detect_magyar.py` sans `--overwrite` ne retraite que les nouveaux messages : le CSV existant est chargé au démarrage et les messages déjà présents sont skippés. Le JSONL est sauvegardé tous les 50 messages.
 
-## Champs enrichis (JSONL)
+## Output
+
+`detect_magyar.py` écrit `results/magyar_detection.csv` (une ligne par visage détecté, avec sa position temporelle dans la vidéo) et enrichit le JSONL. `aggregate_magyar.py` en dérive `results/magyar_aggregated.csv` (une ligne par message), `results/magyar_by_phase.csv` (statistiques par phase) et `results/magyar_monthly.png` (courbe mensuelle colorée par phase).
+
+### Champs ajoutés au JSONL
 
 | Champ | Type | Description |
 |-------|------|-------------|
-| `visages_magyar_ratio` | float | Proportion de frames avec Magyar |
-| `visages_magyar_detections` | int | Nombre total de frames Magyar detecte |
-| `visages_magyar_similarite_max` | float | Similarite cosine maximale avec la reference |
-| `visages_unique` | int | Personnes distinctes detectees (DBSCAN) |
-| `visages_densite` | float | Visages moyens par frame |
+| `visages_magyar_ratio` | float | Proportion de frames où Magyar est détecté |
+| `visages_magyar_detections` | int | Nombre de détections dans le(s) cluster(s) Magyar |
+| `visages_magyar_similarite_max` | float | Similarité cosine maximale avec la référence |
+| `visages_unique` | int | Individus distincts dans le message (DBSCAN) |
+| `visages_densite` | float | Nombre moyen de visages par frame |
 
-`magyar_present` n'est plus ecrit : derivable strictement de `visages_magyar_detections > 0`.
-
-## Seuil de detection
-
-Le seuil par defaut est **0.4** (cosine similarity). Pour l'ajuster :
-- **Baisser** (ex: 0.3) : plus de detections, plus de faux positifs
-- **Monter** (ex: 0.5) : moins de faux positifs, plus de faux negatifs
-
-Le seuil dans `config.yaml` (`insightface.identity_threshold: 0.6`) est une valeur conservative. Le defaut CLI a 0.4 est plus adapte aux conditions reelles du corpus.
-
-## Limites connues
-
-- **Casques et equipement** : le casque militaire, les lunettes FPV et les cagoules reduisent le taux de detection
-- **Qualite des keyframes** : les frames degradees, floues ou en basse lumiere compliquent la detection
-- **Occlusions partielles** : visages de profil, partiellement caches
-- **Faux negatifs en conditions de combat** : poussieres, fumee, mouvements rapides
-- **Taux de non-detection** : c'est une donnee a documenter, pas un defaut a corriger. Le ratio de faux negatifs fait partie de l'analyse
-
-## Idempotence
-
-- `detect_magyar.py` charge le CSV existant au demarrage et skip les messages deja traites (idempotence au niveau message, pas frame)
-- Relancer sans `--overwrite` ne retraite que les nouveaux messages
-- Le JSONL est sauvegarde tous les 50 messages (configurable via `batch.save_every`)
+La présence de Magyar se dérive de `visages_magyar_detections > 0`, il n'y a pas de champ booléen dédié.
 
 ## Méthodologie
 
-**Pourquoi InsightFace ?** InsightFace (modèle `buffalo_l`, ArcFace backbone) produit des embeddings 512d discriminatifs entraînés spécifiquement sur la reconnaissance faciale. Il surpasse DeepFace et FaceNet sur les benchmarks LFW/IJB en conditions difficiles (occultation partielle, angle, basse résolution) — conditions représentatives d'un corpus de vidéos de terrain militaire.
+**Pourquoi InsightFace :** le modèle `buffalo_l` (backbone ArcFace) produit des embeddings 512d entraînés spécifiquement pour la reconnaissance faciale. Il surpasse DeepFace et FaceNet sur les benchmarks LFW/IJB en conditions difficiles (occultation partielle, angle, basse résolution), conditions représentatives d'un corpus de vidéos de terrain militaire.
 
-**Embedding de référence** : plutôt qu'une photo unique (trop sensible aux variations de pose/lumière), on calcule la moyenne L2-normalisée de N embeddings extraits de photos de référence variées. La moyenne dans l'espace des embeddings ArcFace converge vers une représentation stable de l'identité.
+**Embedding de référence :** plutôt qu'une photo unique, trop sensible aux variations de pose et de lumière, on moyenne les embeddings de plusieurs photos variées puis on L2-normalise. La moyenne dans l'espace ArcFace converge vers une représentation stable de l'identité.
 
-**Seuil cosine (défaut 0.4)** : valeur empirique calibrée sur le corpus. En dessous de 0.35 les faux positifs explosent (visages similaires en tenue militaire) ; au-dessus de 0.5 les faux négatifs deviennent trop nombreux (casque, lunettes FPV). La valeur dans `config.yaml` (`insightface.identity_threshold: 0.6`) est conservative et sert de garde-fou pour d'autres usages.
+**Seuil cosine (défaut 0.4) :** valeur calibrée empiriquement sur le corpus. En dessous de 0.35, les faux positifs explosent (visages similaires en tenue militaire) ; au-dessus de 0.5, les faux négatifs deviennent trop nombreux (casque, lunettes FPV). La valeur de `config.yaml` (`insightface.identity_threshold: 0.6`) est volontairement conservative et sert de garde-fou pour d'autres usages.
 
-**Comptage d'individus distincts (DBSCAN)** : tous les embeddings d'un message (toutes frames confondues) sont clusterisés via DBSCAN avec distance cosine (eps=0.55, min_samples=1). Le choix de min_samples=1 évite les outliers (-1) et garantit que chaque visage est attribué à un individu. eps=0.55 correspond à une similarité minimale de 0.45 pour que deux visages soient considérés comme le même individu — seuil volontairement bas pour gérer les occultations partielles.
+**Comptage d'individus (DBSCAN) :** tous les embeddings d'un message, toutes frames confondues, sont clusterisés sur distance cosine avec eps 0.55 et min_samples 1. Le choix de min_samples 1 garantit qu'aucun visage n'est classé comme bruit ; eps 0.55 correspond à une similarité minimale de 0.45 pour fusionner deux visages en un même individu, seuil volontairement bas pour absorber les occultations partielles.
+
+**Limites :** casques, lunettes FPV et cagoules réduisent le taux de détection, tout comme le flou, la basse lumière et la compression des keyframes. Ce taux de non-détection est traité comme une donnée du corpus et non comme un défaut à corriger : la raréfaction des détections fait précisément partie de l'analyse.
