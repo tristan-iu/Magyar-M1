@@ -1,6 +1,7 @@
 telethon>=1.34.0
 python-dotenv>=1.0.0
 python-socks[asyncio]>=2.4.0
+pyyaml>=6.0  # requis par 0_config/utils.py (load_config)
 
 # Hashing (optionnel)
 opencv-python>=4.8.0

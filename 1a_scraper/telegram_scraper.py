@@ -11,17 +11,17 @@ Pipeline :
   3. Extraction métadonnées + téléchargement média
   4. Écriture JSONL (append, crash-safe) + fiche individuelle
 
-Options CLI : --delay, --limit, --no-media, --retry
+Modes : scrape (défaut), --retry, --inject. Options : --delay, --limit, --no-media, --config
 
 Usage:
-    python tscrap.py @channel 2023-01-01 2023-01-15 ./output
-    python tscrap.py @channel 2023-01-01 2023-01-15 ./output --limit 50 --no-media
-    python tscrap.py @channel 2023-01-01 2023-01-15 ./output --retry  # Retélécharge médias manquants
+    python telegram_scraper.py @channel 2023-01-01 2023-01-15 ./output
+    python telegram_scraper.py @channel 2023-01-01 2023-01-15 ./output --limit 50 --no-media
+    python telegram_scraper.py @channel 2023-01-01 2023-01-15 ./output --retry  # Retélécharge médias manquants
+    python telegram_scraper.py --inject [--raw ...] [--target ...] [--dry-run]  # Injection JSONL, sans connexion
 
 Structure output:
     ./output/
     ├── messages.jsonl                          # Fichier maître
-    ├── scrape_log.json                         # Log du scrape
     └── fiches/
         ├── channel_3857_fiche.json             # Métadonnées
         ├── channel_3857_photo.jpg              # Média (si un seul)
@@ -33,29 +33,31 @@ Structure output:
 Structure JSON:
     {
       "message_id": 12345,
-      "channel": "channelname",
+      "canal": "channelname",
       "date": "2024-01-15T15:30:00",
-      "grouped_id": null,
-      "is_forwarded": false,
-      "media_index": null,
-      "caption": "Contenu du message...",
+      "album_id": null,
+      "est_transfere": false,
+      "album_rang": null,
+      "legende": "Contenu du message...",
       "media_type": "video",
-      "media_path": "fiches/channel_12345_video.mp4",
-      "media_duration": 45,
-      "media_dimensions": [1920, 1080],
-      "file_hash": "a1b2c3d4e5f6...",
+      "media_chemin": "fiches/channel_12345_video.mp4",
+      "liens_externes": [{"url": "https://x.com/...", "texte": "Twitter"}],
+      "duree": 45,
+      "largeur": 1920,
+      "hauteur": 1080,
+      "fichier_hash": "a1b2c3d4e5f6...",
       "perceptual_hash": "d4c3b2a1e5f6...",
-      "views": 15000,
-      "forwards": 500,
+      "vues": 15000,
+      "transferts": 500,
       "reactions": 120,
       "reactions_detail": [{"emoji": "...", "count": 100}]
     }
 
 Notes:
     - Toutes les dates sont en UTC (sans timezone explicite)
-    - grouped_id identifie les messages appartenant au même album
-    - media_dimensions: [width, height]
-    - file_hash: MD5 du fichier, perceptual_hash: pHash pour déduplication visuelle
+    - album_id identifie les messages appartenant au même album
+    - largeur, hauteur en pixels (Telegram, peut être écrasé par ffprobe)
+    - fichier_hash: MD5 du fichier, perceptual_hash: pHash pour déduplication visuelle
     - Support proxy optionnel via .env (PROXY_TYPE, PROXY_HOST, PROXY_PORT, etc.)
 
 Dépendances hashing (optionnelles):
@@ -69,6 +71,7 @@ import asyncio
 import argparse
 import random
 import hashlib
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from dotenv import load_dotenv
@@ -77,7 +80,11 @@ from dotenv import load_dotenv
 # on remonte d'un niveau pour aller chercher 0_config/ — convention projet
 _UTILS_DIR = Path(__file__).resolve().parents[1] / "0_config"
 sys.path.insert(0, str(_UTILS_DIR))
-from utils import setup_logging, load_config  # noqa: E402
+from utils import load_config, init_logger  # noqa: E402
+
+# Logger module : configuré par init_logger() dans le point d'entrée.
+# Console INFO + fichier WARNING horodaté (logs/telegram_scraper_errors.log).
+log = logging.getLogger("telegram_scraper")
 
 # Dépendances pour le hashing. Optionnelles parce que sur certaines machines
 # (serveur, CI) opencv est pénible à installer. Le scraper fonctionne sans,
@@ -98,6 +105,8 @@ from telethon.tl.types import (
     DocumentAttributeVideo,
     PhotoSize,
     PhotoSizeProgressive,
+    MessageEntityTextUrl,
+    MessageEntityUrl,
 )
 
 
@@ -142,14 +151,14 @@ Exemples:
     parser.add_argument("--raw", default=None,
                         help="[--inject] JSONL raw source (défaut : paths.raw_path dans config.yaml)")
     parser.add_argument("--target", default=None,
-                        help="[--inject] JSONL enrichi destination (défaut : messages_computervision.jsonl depuis config.yaml)")
+                        help="[--inject] JSONL enrichi destination (défaut : paths.jsonl_clean depuis config.yaml)")
     parser.add_argument("--dry-run", action="store_true",
                         help="[--inject] Affiche les messages à injecter sans modifier le fichier")
 
     return parser.parse_args()
 
 
-def load_credentials():
+def charger_identifiants():
     """Charge les credentials Telegram depuis le fichier .env."""
     # on charge deux fois : d'abord le .env global (racine projet), puis celui
     # du dossier scraper. Le second écrase le premier si doublon.
@@ -161,20 +170,18 @@ def load_credentials():
     phone = os.getenv("TELEGRAM_PHONE_NUMBER")
 
     if not all([api_id, api_hash, phone]):
-        print("=" * 50)
-        print("ERREUR: Credentials manquants dans .env")
-        print("=" * 50)
-        print("\nCréez un fichier .env avec:")
-        print("  TELEGRAM_API_ID=your_api_id")
-        print("  TELEGRAM_API_HASH=your_api_hash")
-        print("  TELEGRAM_PHONE_NUMBER=+33612345678")
-        print("\nObtenez vos credentials sur: https://my.telegram.org/apps")
+        log.error("Credentials manquants dans .env")
+        log.error("Créez un fichier .env avec :")
+        log.error("  TELEGRAM_API_ID=your_api_id")
+        log.error("  TELEGRAM_API_HASH=your_api_hash")
+        log.error("  TELEGRAM_PHONE_NUMBER=+33612345678")
+        log.error("Obtenez vos credentials sur : https://my.telegram.org/apps")
         sys.exit(1)
 
     return int(api_id), api_hash, phone
 
 
-def load_proxy_config() -> dict | None:
+def charger_config_proxy() -> dict | None:
     """Charge la configuration proxy depuis .env si présente.
 
     Utile quand le scrape se fait depuis un réseau universitaire qui bloque
@@ -214,7 +221,7 @@ def load_proxy_config() -> dict | None:
 # C'est ce qui garantit un schéma stable en sortie, indépendant de l'API
 # Telegram qui peut changer entre versions de Telethon.
 
-def parse_channel_name(channel_input: str) -> str:
+def analyser_nom_canal(channel_input: str) -> str:
     """Extrait le username depuis l'input utilisateur.
 
     Accepte plusieurs formats parce qu'on copie-colle souvent depuis le navigateur
@@ -232,13 +239,13 @@ def parse_channel_name(channel_input: str) -> str:
     return channel
 
 
-def parse_date(date_str: str) -> datetime:
+def analyser_date(date_str: str) -> datetime:
     """Parse une date string en datetime UTC."""
     try:
         dt = datetime.strptime(date_str, "%Y-%m-%d")
         return dt.replace(tzinfo=timezone.utc)
     except ValueError:
-        print(f"Erreur: Format de date invalide '{date_str}'. Utilisez YYYY-MM-DD")
+        log.error("Format de date invalide '%s'. Utilisez YYYY-MM-DD", date_str)
         sys.exit(1)
 
 
@@ -260,7 +267,14 @@ def format_datetime(dt: datetime | None) -> str | None:
     return dt.strftime("%Y-%m-%dT%H:%M:%S")
 
 
-def get_media_type(message) -> str | None:
+# Types de média qu'on télécharge réellement comme fichier. Les "document"
+# (stickers/GIF non analysés) et "other" (sondages, géoloc, webpage) ne sont
+# pas des fichiers exploitables par le pipeline → on les laisse sans média.
+# Un message texte seul a media_type=None et n'a rien à télécharger.
+TYPES_MEDIA_TELECHARGEABLES = ("photo", "video", "audio")
+
+
+def obtenir_type_media(message) -> str | None:
     """Détermine le type de média du message.
 
     Telegram distingue Photo (compressée par le serveur) et Document (fichier brut).
@@ -290,11 +304,16 @@ def get_media_type(message) -> str | None:
     return "other"
 
 
-def get_media_extension(media_type: str) -> str:
+def obtenir_extension_media(media_type: str) -> str:
     """Retourne l'extension de fichier pour un type de média.
 
     On force des extensions standardisées plutôt que de prendre celles de Telegram
     — ça évite les .webm, .ogg, .webp qui compliquent ffprobe/Whisper après.
+    IMPORTANT : l'extension doit être une fonction PURE de media_type (pas du
+    mime réel), pour que le mode --retry puisse reconstruire le nom de fichier
+    attendu à partir du seul JSONL (cf. nom_fichier_media). Une note vocale opus
+    est donc sauvée en .mp3 ; ffprobe/Whisper la lisent au contenu, l'extension
+    n'est qu'une étiquette.
 
     Entrée : media_type — str ("photo", "video", "audio", "document", "other")
     Sortie : extension de fichier sans point (ex: "mp4", "jpg")
@@ -309,7 +328,26 @@ def get_media_extension(media_type: str) -> str:
     return extensions.get(media_type, "bin")
 
 
-def extract_media_metadata(message) -> dict:
+def nom_fichier_media(
+    canal: str, message_id: int, media_type: str, album_rang: int | None = None
+) -> str:
+    """Construit le nom de fichier d'un média — source unique de vérité.
+
+    Convention : canal_msgid[_rang]_type.ext. Déterministe (dépend uniquement
+    de valeurs présentes dans le JSONL) → le mode --retry reconstruit ce nom
+    sans avoir besoin de l'objet Message Telethon.
+
+    Entrée : canal — str, message_id — int, media_type — str,
+             album_rang — int si album, None si solo
+    Sortie : nom de fichier (ex: "robert_magyar_8_video.mp4")
+    """
+    ext = obtenir_extension_media(media_type)
+    if album_rang is not None:
+        return f"{canal}_{message_id}_{album_rang}_{media_type}.{ext}"
+    return f"{canal}_{message_id}_{media_type}.{ext}"
+
+
+def extraire_meta_media(message) -> dict:
     """Extrait les métadonnées du média : dimensions [w, h] et durée.
 
     ATTENTION : ces dimensions viennent de l'API Telegram, pas du fichier lui-même.
@@ -319,7 +357,7 @@ def extract_media_metadata(message) -> dict:
     AVANT le téléchargement du média, utile pour filtrer sans tout télécharger.
 
     Entrée : message — objet Message Telethon
-    Sortie : dict avec "media_dimensions" ([w, h]) et/ou "media_duration" (float, secondes)
+    Sortie : dict avec "largeur", "hauteur" et/ou "duree" (float, secondes)
     """
     if not message.media:
         return {}
@@ -353,19 +391,19 @@ def extract_media_metadata(message) -> dict:
         if doc and hasattr(doc, 'attributes'):
             for attr in doc.attributes:
                 if isinstance(attr, DocumentAttributeVideo):
-                    metadata["media_duration"] = attr.duration
+                    metadata["duree"] = attr.duration
                     width = attr.w
                     height = attr.h
                     break
 
-    # on stocke en [width, height] — même convention que ffprobe et PIL
     if width is not None and height is not None:
-        metadata["media_dimensions"] = [width, height]
+        metadata["largeur"] = width
+        metadata["hauteur"] = height
 
     return metadata
 
 
-def extract_forward_info(message) -> bool:
+def est_transfere_message(message) -> bool:
     """Retourne True si le message est un forward, False sinon.
 
     Important pour le corpus : les forwards ne sont PAS du contenu original de Magyar.
@@ -378,7 +416,7 @@ def extract_forward_info(message) -> bool:
     return message.forward is not None
 
 
-def extract_reactions(message) -> dict:
+def extraire_reactions(message) -> dict:
     """Extrait les réactions : total + détail par emoji.
 
     On dénormalise ici (total + liste de {emoji, count}) pour avoir les deux
@@ -414,6 +452,66 @@ def extract_reactions(message) -> dict:
     }
 
 
+# ── Liens externes (entités Telegram) ────────────────────────────────────────
+# Telegram distingue deux types d'entités URL :
+#   - MessageEntityUrl      : URL brute écrite en clair dans le texte
+#                             (ex: "https://youtu.be/xxxxx" dans la légende)
+#                             → texte = null (déjà visible dans `legende`)
+#   - MessageEntityTextUrl  : texte hyperlié — l'URL n'est PAS dans le texte
+#                             (ex: le mot "Twitter" qui cache https://x.com/...)
+#                             → texte = l'ancre affichée (ex: "Twitter")
+#
+# IMPORTANT — encodage UTF-16 :
+# Telegram stocke les offsets d'entités en UTF-16 code units. Python traite
+# les strings en code points Unicode. Les emojis du plan astral (🏦, 🇺🇦, etc.)
+# valent 2 code units UTF-16 mais 1 char Python → chaque emoji avant une URL
+# décale l'extraction de 1 char. Résultat : "https://youtube.com" devient
+# "tps://youtube.com" selon le nombre d'emojis précédents.
+# Correction : encoder en UTF-16LE, appliquer l'offset en bytes, décoder.
+
+def _segment_utf16(texte: str, offset: int, length: int) -> str:
+    """Extrait un segment en respectant les offsets UTF-16 de Telegram.
+
+    Entrée : texte — str Python, offset/length — en UTF-16 code units (Telegram)
+    Sortie : sous-chaîne correcte même si des emojis précèdent l'URL
+    """
+    encoded = texte.encode("utf-16-le")
+    segment = encoded[offset * 2 : (offset + length) * 2]
+    return segment.decode("utf-16-le")
+
+
+def extraire_liens_externes(message) -> list[dict]:
+    """Extrait tous les liens URL des entités d'un message Telegram.
+
+    Le texte brut de la légende ne contient pas les liens « inline » (texte
+    cliquable dont l'URL est cachée). On les récupère depuis les entités.
+
+    Entrée : message — objet Message Telethon (avec .entities et .message)
+    Sortie : liste de {"url": str, "texte": str|None}, vide si aucun lien
+    """
+    liens = []
+
+    if not message.entities:
+        return liens
+
+    texte = message.message or ""
+
+    for ent in message.entities:
+        if isinstance(ent, MessageEntityTextUrl):
+            # Lien inline : l'URL est dans ent.url, l'ancre dans le texte
+            ancre = _segment_utf16(texte, ent.offset, ent.length).strip()
+            liens.append({"url": ent.url, "texte": ancre or None})
+
+        elif isinstance(ent, MessageEntityUrl):
+            # URL brute : l'URL est dans le texte lui-même (offset + length)
+            # On passe par l'extraction UTF-16 pour corriger le décalage emoji
+            url = _segment_utf16(texte, ent.offset, ent.length).strip()
+            if url:
+                liens.append({"url": url, "texte": None})
+
+    return liens
+
+
 # ── Hashing ──────────────────────────────────────────────────────────────────
 # Deux types de hash, deux usages différents :
 # - MD5 = empreinte binaire STRICTE. Deux fichiers identiques bit à bit = même MD5.
@@ -425,7 +523,7 @@ def extract_reactions(message) -> dict:
 # Pourquoi les deux : MD5 seul rate les re-uploads (Telegram recompresse),
 # pHash seul donne des faux positifs sur des images génériques (drapeaux, logos).
 
-def calculate_md5(file_path: str, chunk_size: int = 8192) -> str | None:
+def calculer_md5(file_path: str, chunk_size: int = 8192) -> str | None:
     """Calcule le hash MD5 (empreinte binaire stricte).
 
     Lecture par chunks pour ne pas charger des vidéos de 500Mo en RAM.
@@ -440,11 +538,11 @@ def calculate_md5(file_path: str, chunk_size: int = 8192) -> str | None:
                 md5.update(chunk)
         return md5.hexdigest()
     except Exception as e:
-        print(f"  ⚠ Erreur MD5 sur {file_path}: {e}")
+        log.warning("Erreur MD5 sur %s : %s", file_path, e)
         return None
 
 
-def get_image_for_phash(media_path: str, media_type: str) -> "Image.Image | None":
+def obtenir_image_pour_phash(media_path: str, media_type: str) -> "Image.Image | None":
     """Récupère une image PIL pour le calcul du pHash.
 
     Pour les vidéos : on extrait la frame à t=1s plutôt que la première frame,
@@ -486,13 +584,13 @@ def get_image_for_phash(media_path: str, media_type: str) -> "Image.Image | None
             return None
 
     except Exception as e:
-        print(f"  ⚠ Erreur extraction image pour pHash ({media_path}): {e}")
+        log.warning("Erreur extraction image pour pHash (%s) : %s", media_path, e)
         return None
 
     return None
 
 
-def calculate_phash(media_path: str, media_type: str) -> str | None:
+def calculer_phash(media_path: str, media_type: str) -> str | None:
     """Calcule le Perceptual Hash (empreinte visuelle).
 
     hash_size=8 → hash de 64 bits. C'est le défaut d'imagehash, bon compromis
@@ -505,19 +603,19 @@ def calculate_phash(media_path: str, media_type: str) -> str | None:
     if not HASHING_AVAILABLE:
         return None
 
-    img = get_image_for_phash(media_path, media_type)
+    img = obtenir_image_pour_phash(media_path, media_type)
     if img:
         try:
             return str(imagehash.phash(img, hash_size=8))
         except Exception as e:
-            print(f"  ⚠ Erreur calcul pHash: {e}")
+            log.warning("Erreur calcul pHash : %s", e)
     return None
 
 
-def hash_media(file_path: str, media_type: str) -> tuple[str | None, str | None]:
+def hacher_media(file_path: str, media_type: str) -> tuple[str | None, str | None]:
     """Calcule les deux hashs (MD5 + pHash) pour un fichier média."""
-    file_hash = calculate_md5(file_path)
-    perceptual_hash = calculate_phash(file_path, media_type)
+    file_hash = calculer_md5(file_path)
+    perceptual_hash = calculer_phash(file_path, media_type)
     return file_hash, perceptual_hash
 
 
@@ -526,11 +624,11 @@ def hash_media(file_path: str, media_type: str) -> tuple[str | None, str | None]
 # 1) une ligne dans le JSONL maître (pour les analyses batch)
 # 2) une fiche JSON individuelle (pour le pipeline d'enrichissement)
 #
-# Le dict produit par message_to_dict() est le SCHÉMA DE BASE du corpus.
+# Le dict produit par message_vers_dict() est le SCHÉMA DE BASE du corpus.
 # Tous les enrichissements ultérieurs (ffprobe, Whisper, OCR) AJOUTENT des
 # champs à ce schéma, mais ne modifient jamais les champs existants.
 
-def message_to_dict(
+def message_vers_dict(
     message,
     channel_username: str,
     media_path: str | None = None,
@@ -550,46 +648,51 @@ def message_to_dict(
     Sortie : dict conforme au schéma JSONL du corpus
     """
 
-    is_forwarded = extract_forward_info(message)
-    reactions_info = extract_reactions(message)
-    media_metadata = extract_media_metadata(message)
+    is_forwarded = est_transfere_message(message)
+    reactions_info = extraire_reactions(message)
+    media_metadata = extraire_meta_media(message)
 
     return {
-        # Identification — le couple (channel, message_id) est la clé primaire
+        # Identification — le couple (canal, message_id) est la clé primaire
         "message_id": message.id,
-        "channel": channel_username,
+        "canal": channel_username,
         "date": format_datetime(message.date),
-        "grouped_id": message.grouped_id,  # non-null si le message fait partie d'un album
+        "album_id": message.grouped_id,  # non-null si le message fait partie d'un album
 
         # Forward — permet de filtrer le contenu non-original
-        "is_forwarded": is_forwarded,
+        "est_transfere": is_forwarded,
 
         # Album — index du média dans l'album (1, 2, 3...), null si message solo
-        "media_index": media_index,
+        "album_rang": media_index,
 
-        # Contenu textuel — caption Telegram, peut être null (vidéo sans texte)
+        # Contenu textuel — légende Telegram, peut être null (vidéo sans texte)
         # on peut aussi avoir du texte SANS média (message texte pur)
-        "caption": message.text or None,
+        "legende": message.text or None,
+
+        # Liens externes — URL des entités Telegram (inline + brutes).
+        # [] si aucun lien. Le texte brut de `legende` ne contient pas les
+        # liens « inline » (ancre cliquable masquant l'URL) → on les extrait ici.
+        "liens_externes": extraire_liens_externes(message),
 
         # Media — type + chemin relatif vers le fichier téléchargé
-        "media_type": get_media_type(message),
-        "media_path": media_path,
-        **media_metadata,  # media_duration, media_dimensions (si disponibles)
+        "media_type": obtenir_type_media(message),
+        "media_chemin": media_path,
+        **media_metadata,  # duree, largeur, hauteur (si disponibles)
 
         # Hashing — pour déduplication (cf. section hashing plus haut)
-        "file_hash": file_hash,
+        "fichier_hash": file_hash,
         "perceptual_hash": perceptual_hash,
 
         # Engagement — métriques d'audience du message
         # ATTENTION : ces valeurs sont un snapshot au moment du scrape.
         # Elles évoluent dans le temps (un vieux post continue à accumuler des vues).
-        "views": message.views,
-        "forwards": message.forwards,
+        "vues": message.views,
+        "transferts": message.forwards,
         **reactions_info,  # reactions (total), reactions_detail (par emoji)
     }
 
 
-async def download_media(
+async def telecharger_media(
     client,
     message,
     fiches_dir: Path,
@@ -598,9 +701,9 @@ async def download_media(
 ) -> tuple[str | None, str | None, str | None]:
     """Télécharge le média et calcule les hashs.
 
-    On ne télécharge que photos et vidéos — les audios isolés sont rares dans
-    le corpus Magyar, et les "documents" sont souvent des stickers/GIF qu'on
-    n'analyse pas.
+    On télécharge photos, vidéos et audios (cf. TYPES_MEDIA_TELECHARGEABLES).
+    Les "documents" (souvent stickers/GIF) et "other" (sondages, géoloc…) ne
+    sont pas des fichiers exploitables par le pipeline → ignorés.
 
     Convention de nommage : channel_msgid[_index]_type.ext
     Le chemin stocké dans le JSONL est RELATIF à output_dir (ex: "fiches/robert_magyar_8_video.mp4").
@@ -614,17 +717,12 @@ async def download_media(
     if not message.media:
         return None, None, None
 
-    media_type = get_media_type(message)
-    if media_type not in ["photo", "video"]:
+    media_type = obtenir_type_media(message)
+    if media_type not in TYPES_MEDIA_TELECHARGEABLES:
         return None, None, None
 
-    ext = get_media_extension(media_type)
-
-    # Nom de fichier : channel_msgid_type.ext (solo) ou channel_msgid_index_type.ext (album)
-    if media_index is not None:
-        filename = f"{channel_username}_{message.id}_{media_index}_{media_type}.{ext}"
-    else:
-        filename = f"{channel_username}_{message.id}_{media_type}.{ext}"
+    # Nom de fichier déterministe (cf. nom_fichier_media) — réutilisé par --retry
+    filename = nom_fichier_media(channel_username, message.id, media_type, media_index)
 
     fiches_dir.mkdir(parents=True, exist_ok=True)
     filepath = fiches_dir / filename
@@ -634,16 +732,17 @@ async def download_media(
         relative_path = f"fiches/{filename}"
 
         # hashs calculés APRÈS téléchargement — on hash le fichier local
-        file_hash, perceptual_hash = hash_media(str(filepath), media_type)
+        file_hash, perceptual_hash = hacher_media(str(filepath), media_type)
 
         return relative_path, file_hash, perceptual_hash
     except Exception as e:
-        # on ne crashe PAS le pipeline — on log et on continue (règle n°5 du CLAUDE.md)
-        print(f"  ⚠ Échec téléchargement média msg {message.id}: {e}")
+        # on ne crashe PAS le pipeline — on log et on continue (règle du projet :
+        # une erreur sur un message ne doit jamais interrompre la collecte)
+        log.warning("Échec téléchargement média msg %s : %s", message.id, e)
         return None, None, None
 
 
-def save_fiche(fiches_dir: Path, channel_username: str, message_id: int, msg_dict: dict):
+def enregistrer_fiche(fiches_dir: Path, channel_username: str, message_id: int, msg_dict: dict):
     """Sauvegarde la fiche JSON individuelle.
 
     Une fiche = un fichier JSON par message. C'est le point d'entrée pour le
@@ -663,12 +762,12 @@ def save_fiche(fiches_dir: Path, channel_username: str, message_id: int, msg_dic
         json.dump(msg_dict, f, ensure_ascii=False, indent=2)
 
 
-def append_message_jsonl(filepath: Path, msg_dict: dict):
+def ajouter_message_jsonl(filepath: Path, msg_dict: dict):
     """Ajoute un message au fichier JSONL (crash-safe).
 
     Mode append ("a") : si le script crashe à mi-parcours, on ne perd pas
     les messages déjà écrits. C'est pour ça qu'on a aussi le mécanisme de
-    reprise (existing_ids) dans scrape_channel().
+    reprise (ids_existants) dans scraper_canal().
 
     Entrée : filepath — Path vers le fichier .jsonl, msg_dict — dict à sérialiser
     Sortie : None (ajoute une ligne JSON au fichier)
@@ -682,7 +781,7 @@ def append_message_jsonl(filepath: Path, msg_dict: dict):
 # (ban temporaire de 30s à 24h). Le délai randomisé ±30% évite les patterns
 # réguliers que Telegram détecte comme du bot.
 
-async def random_delay(base_delay: float):
+async def delai_aleatoire(base_delay: float):
     delay = base_delay * random.uniform(0.7, 1.3)
     await asyncio.sleep(delay)
 
@@ -693,58 +792,75 @@ async def random_delay(base_delay: float):
 # retélécharge QUE les médias dont le fichier est absent sur disque.
 # Idempotent : on peut relancer autant de fois qu'on veut.
 
-async def retry_missing_media(
+async def retenter_medias_manquants(
     client: TelegramClient,
     channel_name: str,
     output_dir: Path,
     delay: float
 ):
-    """Retélécharge les médias manquants listés dans le JSONL."""
+    """Retélécharge les médias manquants listés dans le JSONL.
 
-    print(f"\n→ Mode RETRY: vérification des médias manquants")
+    Couvre DEUX cas de média absent sur disque :
+      (a) `media_chemin` renseigné mais fichier supprimé/déplacé ;
+      (b) `media_chemin` null parce que le téléchargement a échoué PENDANT le
+          scrape (timeout, FloodWait, coupure) — cas le plus courant.
+    Dans les deux cas, le nom de fichier est déterministe (cf. nom_fichier_media)
+    donc on reconstruit le chemin attendu à partir du seul JSONL. Après
+    récupération, on réécrit `media_chemin` + les hashs dans le JSONL et la fiche.
+    """
+
+    log.info("Mode RETRY : vérification des médias manquants")
 
     jsonl_path = output_dir / "messages.jsonl"
     if not jsonl_path.exists():
-        print(f"✗ Fichier {jsonl_path} introuvable")
+        log.error("Fichier %s introuvable", jsonl_path)
         return
 
-    # on parcourt le JSONL existant pour trouver les médias attendus mais absents
-    messages_to_retry = []
+    # On parcourt le JSONL pour trouver les messages à média dont le fichier est
+    # absent. On garde (message, chemin_relatif_attendu) — le chemin vient du
+    # JSONL s'il est présent, sinon on le reconstruit.
+    a_retenter: list[tuple[dict, str]] = []
     with open(jsonl_path, "r", encoding="utf-8") as f:
         for line in f:
+            if not line.strip():
+                continue
             try:
                 msg = json.loads(line)
-                # critère : le JSONL dit qu'il y a un média, mais le fichier n'est pas là
-                if msg.get("media_type") in ["photo", "video"] and msg.get("media_path"):
-                    media_file = output_dir / msg["media_path"]
-                    if not media_file.exists():
-                        messages_to_retry.append(msg)
-            except (json.JSONDecodeError, KeyError):
-                pass
+            except json.JSONDecodeError:
+                continue
+            if msg.get("media_type") not in TYPES_MEDIA_TELECHARGEABLES:
+                continue
+            chemin = msg.get("media_chemin") or "fiches/" + nom_fichier_media(
+                msg["canal"], msg["message_id"], msg["media_type"], msg.get("album_rang")
+            )
+            if not (output_dir / chemin).exists():
+                a_retenter.append((msg, chemin))
 
-    if not messages_to_retry:
-        print("✓ Tous les médias sont présents!")
+    if not a_retenter:
+        log.info("Tous les médias sont présents !")
         return
 
-    print(f"  ℹ {len(messages_to_retry)} médias manquants à retélécharger")
-    print("-" * 50)
+    log.info("%d médias manquants à retélécharger", len(a_retenter))
 
     # on doit se reconnecter à la chaîne pour récupérer les messages par ID
     try:
         entity = await client.get_entity(channel_name)
     except Exception as e:
-        print(f"✗ Erreur: Impossible d'accéder à '{channel_name}': {e}")
+        log.error("Impossible d'accéder à '%s' : %s", channel_name, e)
         return
 
-    success_count = 0
-    fail_count = 0
+    n_succes = 0
+    n_echecs = 0
     fiches_dir = output_dir / "fiches"
 
-    for msg in messages_to_retry:
-        msg_id = msg["message_id"]
-        media_path = msg["media_path"]
+    # On collecte les champs à répercuter (chemin + hashs) pour réécrire le JSONL
+    # et les fiches APRÈS la boucle (réécriture unique, atomique). Sans ça, un
+    # média récupéré resterait à `media_chemin`/hash null dans le corpus.
+    maj_medias: dict[int, dict] = {}
 
-        print(f"  ↓ Retry msg {msg_id}...", end=" ")
+    for msg, chemin in a_retenter:
+        msg_id = msg["message_id"]
+        media_type = msg["media_type"]
 
         try:
             # on récupère le message FRAIS depuis Telegram (pas depuis le JSONL)
@@ -753,32 +869,103 @@ async def retry_missing_media(
 
             if message is None:
                 # le message a été supprimé entre-temps — ça arrive sur les canaux actifs
-                print("✗ message supprimé")
-                fail_count += 1
+                log.warning("Retry msg %s : message supprimé", msg_id)
+                n_echecs += 1
                 continue
 
             if not message.media:
-                print("✗ pas de média")
-                fail_count += 1
+                log.warning("Retry msg %s : pas de média", msg_id)
+                n_echecs += 1
                 continue
 
-            # Télécharger au même chemin que prévu dans le JSONL
-            filepath = output_dir / media_path
+            # Télécharger au chemin déterministe (reconstruit ou repris du JSONL)
+            filepath = output_dir / chemin
             filepath.parent.mkdir(parents=True, exist_ok=True)
 
             await client.download_media(message, file=str(filepath))
-            print("✓")
-            success_count += 1
+
+            # Recalcul des hashs sur le fichier fraîchement récupéré
+            file_hash, perceptual_hash = hacher_media(str(filepath), media_type)
+            maj_medias[msg_id] = {
+                "media_chemin": chemin,
+                "fichier_hash": file_hash,
+                "perceptual_hash": perceptual_hash,
+            }
+
+            log.info("Retry msg %s : ✓", msg_id)
+            n_succes += 1
 
         except Exception as e:
-            print(f"✗ {e}")
-            fail_count += 1
+            log.warning("Retry msg %s : ✗ %s", msg_id, e)
+            n_echecs += 1
 
-        await random_delay(delay)
+        await delai_aleatoire(delay)
 
-    print("-" * 50)
-    print(f"Réussis: {success_count}")
-    print(f"Échecs:  {fail_count}")
+    # Répercussion dans le corpus (JSONL maître + fiches)
+    if maj_medias:
+        _appliquer_maj_retry(jsonl_path, fiches_dir, maj_medias)
+
+    log.info("Retry terminé — réussis : %d, échecs : %d", n_succes, n_echecs)
+
+
+def _appliquer_maj_retry(
+    jsonl_path: Path,
+    fiches_dir: Path,
+    maj_medias: dict[int, dict],
+) -> None:
+    """Répercute media_chemin + hashs récupérés en retry dans le JSONL et les fiches.
+
+    Réécriture atomique du JSONL (tmp + os.replace) pour ne pas corrompre le
+    fichier si le script est interrompu. Les fiches sont mises à jour en place
+    en ne touchant QUE les champs concernés — les enrichissements éventuels
+    (ffprobe, Whisper…) déjà présents sont préservés (règle d'idempotence).
+
+    Entrée : jsonl_path — JSONL maître, fiches_dir — dossier des fiches,
+             maj_medias — {message_id: {media_chemin, fichier_hash, perceptual_hash}}
+    Sortie : None (réécrit le JSONL et les fiches concernées sur disque)
+    """
+    # JSONL : on relit tout, on patche les lignes concernées, on réécrit en tmp.
+    # On préserve les lignes mal formées telles quelles plutôt que de les perdre.
+    lignes: list[str] = []
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                lignes.append(line.rstrip("\n"))
+                continue
+            maj = maj_medias.get(msg.get("message_id"))
+            if maj is not None:
+                msg.update(maj)
+            lignes.append(json.dumps(msg, ensure_ascii=False))
+
+    tmp_path = jsonl_path.with_suffix(".jsonl.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        for ligne in lignes:
+            f.write(ligne + "\n")
+    os.replace(tmp_path, jsonl_path)
+
+    # Fiches : merge ciblé des champs récupérés, on préserve le reste
+    for msg_id, maj in maj_medias.items():
+        # On a besoin du canal pour le nom de fiche — on le relit depuis le JSONL
+        # via une recherche légère (les fiches sont nommées canal_msgid_fiche.json).
+        # Toutes les fiches partagent le même canal, donc on le déduit du glob.
+        fiches = list(fiches_dir.glob(f"*_{msg_id}_fiche.json"))
+        if not fiches:
+            continue
+        fiche_path = fiches[0]
+        try:
+            with open(fiche_path, "r", encoding="utf-8") as f:
+                fiche = json.load(f)
+            fiche.update(maj)
+            with open(fiche_path, "w", encoding="utf-8") as f:
+                json.dump(fiche, f, ensure_ascii=False, indent=2)
+        except (json.JSONDecodeError, OSError) as e:
+            log.warning("Fiche %s non mise à jour : %s", fiche_path.name, e)
+
+    log.info("Corpus mis à jour pour %d média(s) (JSONL + fiches)", len(maj_medias))
 
 
 # ── Boucle principale de scrape ──────────────────────────────────────────────
@@ -791,7 +978,7 @@ async def retry_missing_media(
 # - CRASH-SAFE : écriture en append, un message à la fois
 # - CHRONOLOGIQUE : reverse=True dans iter_messages (ancien → récent)
 
-async def scrape_channel(
+async def scraper_canal(
     client: TelegramClient,
     channel_name: str,
     start_date: datetime,
@@ -799,27 +986,25 @@ async def scrape_channel(
     output_dir: Path,
     delay: float,
     limit: int | None,
-    download_media_flag: bool
+    telecharger_medias: bool
 ):
     """Scrape les messages de la chaîne dans la plage de dates."""
 
-    print(f"\n→ Connexion à la chaîne: {channel_name}")
+    log.info("Connexion à la chaîne : %s", channel_name)
 
     try:
         entity = await client.get_entity(channel_name)
     except Exception as e:
-        print(f"✗ Erreur: Impossible d'accéder à '{channel_name}': {e}")
+        log.error("Impossible d'accéder à '%s' : %s", channel_name, e)
         return
 
     channel_title = getattr(entity, 'title', channel_name)
     channel_id = getattr(entity, 'id', None)
 
-    print(f"✓ Chaîne trouvée: {channel_title}")
-    print(f"  ID: {channel_id}")
-    print(f"  Période: {start_date.date()} → {end_date.date()}")
-    print(f"  Limite: {limit if limit else 'aucune'}")
-    print(f"  Médias: {'non' if not download_media_flag else 'oui'}")
-    print("-" * 50)
+    log.info("Chaîne trouvée : %s (ID %s)", channel_title, channel_id)
+    log.info("  Période : %s → %s", start_date.date(), end_date.date())
+    log.info("  Limite : %s", limit if limit else "aucune")
+    log.info("  Médias : %s", "non" if not telecharger_medias else "oui")
 
     # Setup output — on crée l'arborescence si elle n'existe pas
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -829,26 +1014,26 @@ async def scrape_channel(
 
     # Reprise après interruption : on charge les IDs déjà scrapés pour les skip.
     # Ça rend le script IDEMPOTENT — on peut le relancer sans rescraper.
-    existing_ids = set()
+    ids_existants = set()
     if jsonl_path.exists():
         with open(jsonl_path, "r", encoding="utf-8") as f:
             for line in f:
                 try:
                     msg = json.loads(line)
-                    existing_ids.add(msg["message_id"])
+                    ids_existants.add(msg["message_id"])
                 except (json.JSONDecodeError, KeyError):
                     pass
-        if existing_ids:
-            print(f"  ℹ {len(existing_ids)} messages déjà scrapés, reprise...")
+        if ids_existants:
+            log.info("%d messages déjà scrapés, reprise...", len(ids_existants))
 
-    message_count = 0
-    new_count = 0
-    media_count = 0
+    n_messages = 0
+    n_nouveaux = 0
+    n_medias = 0
 
     # Gestion des albums Telegram : quand Magyar poste un album (plusieurs photos/vidéos
     # dans un même message), Telegram les envoie comme des messages séparés avec le même
     # grouped_id. On numérote les médias (1, 2, 3...) pour les distinguer dans le nommage.
-    album_counters = {}  # grouped_id -> compteur
+    compteurs_album = {}  # grouped_id -> compteur
 
     # iter_messages avec reverse=True : on parcourt du plus ancien au plus récent.
     # offset_date = start_date : on commence à partir de cette date.
@@ -869,83 +1054,64 @@ async def scrape_channel(
         if msg_date < start_date:
             continue
 
-        message_count += 1
+        n_messages += 1
 
         # Vérifier limite (utile pour les tests : --limit 10)
-        if limit and new_count >= limit:
-            print(f"\n  ⚠ Limite atteinte ({limit} messages)")
+        if limit and n_nouveaux >= limit:
+            log.info("Limite atteinte (%d messages)", limit)
             break
 
         # Skip si déjà scrapé — c'est ici que l'idempotence opère
-        if message.id in existing_ids:
+        if message.id in ids_existants:
             continue
 
-        new_count += 1
+        n_nouveaux += 1
 
         # Numérotation des médias d'album
         media_index = None
         if message.grouped_id:
-            if message.grouped_id not in album_counters:
-                album_counters[message.grouped_id] = 0
-            album_counters[message.grouped_id] += 1
-            media_index = album_counters[message.grouped_id]
+            if message.grouped_id not in compteurs_album:
+                compteurs_album[message.grouped_id] = 0
+            compteurs_album[message.grouped_id] += 1
+            media_index = compteurs_album[message.grouped_id]
 
         # Téléchargement média (si demandé et si le message en contient un)
         media_path = None
         file_hash = None
         perceptual_hash = None
 
-        if download_media_flag and message.media and get_media_type(message) in ["photo", "video"]:
-            print(f"  ↓ Média msg {message.id}" + (f" (album #{media_index})" if media_index else ""))
-            media_path, file_hash, perceptual_hash = await download_media(
+        if telecharger_medias and message.media and obtenir_type_media(message) in TYPES_MEDIA_TELECHARGEABLES:
+            log.info("Média msg %s%s", message.id, f" (album #{media_index})" if media_index else "")
+            media_path, file_hash, perceptual_hash = await telecharger_media(
                 client, message, fiches_dir,
                 channel_name, media_index
             )
             if media_path:
-                media_count += 1
-            await random_delay(delay)
+                n_medias += 1
+            await delai_aleatoire(delay)
 
         # Construction du dict normalisé
-        msg_dict = message_to_dict(
+        msg_dict = message_vers_dict(
             message, channel_name, media_path, media_index,
             file_hash, perceptual_hash
         )
 
         # Double écriture : JSONL maître (analyses batch) + fiche individuelle (pipeline)
-        append_message_jsonl(jsonl_path, msg_dict)
-        save_fiche(fiches_dir, channel_name, message.id, msg_dict)
+        ajouter_message_jsonl(jsonl_path, msg_dict)
+        enregistrer_fiche(fiches_dir, channel_name, message.id, msg_dict)
 
-        # Progression visible (règle n°6 du CLAUDE.md)
-        if new_count % 25 == 0:
-            print(f"  ... {new_count} nouveaux messages")
+        # Progression visible (n/total dans les logs)
+        if n_nouveaux % 25 == 0:
+            log.info("... %d nouveaux messages", n_nouveaux)
 
         # délai réduit entre messages (pas de téléchargement média = plus rapide)
-        await random_delay(delay / 2)
+        await delai_aleatoire(delay / 2)
 
-    print("-" * 50)
-    print(f"Messages parcourus: {message_count}")
-    print(f"Nouveaux messages:  {new_count}")
-    print(f"Médias téléchargés: {media_count}")
+    log.info("Messages parcourus : %d | nouveaux : %d | médias téléchargés : %d",
+             n_messages, n_nouveaux, n_medias)
 
-    # Log de scrape — traçabilité : quand, quoi, combien
-    log_file = output_dir / "scrape_log.json"
-    log_data = {
-        "channel_username": channel_name,
-        "channel_title": channel_title,
-        "channel_id": channel_id,
-        "start_date": format_datetime(start_date),
-        "end_date": format_datetime(end_date),
-        "messages_scraped": new_count,
-        "media_downloaded": media_count,
-        "completed_at": format_datetime(datetime.now(timezone.utc)),
-    }
-
-    with open(log_file, "w", encoding="utf-8") as f:
-        json.dump(log_data, f, ensure_ascii=False, indent=2)
-
-    print(f"\n✓ Fichier maître: {jsonl_path}")
-    print(f"✓ Fiches: {fiches_dir}")
-    print(f"✓ Log: {log_file}")
+    log.info("Fichier maître : %s", jsonl_path)
+    log.info("Fiches : %s", fiches_dir)
 
 
 # ── Injection JSONL ──────────────────────────────────────────────────────────
@@ -953,7 +1119,7 @@ async def scrape_channel(
 # enrichi. Idempotent — seuls les message_id absents sont ajoutés. Ne nécessite
 # pas de connexion Telegram.
 
-def run_inject(args) -> None:
+def executer_injection(args) -> None:
     """Intègre les nouveaux messages raw dans le JSONL enrichi."""
     cfg = load_config(args.config)
     corpus_base = Path(cfg["paths"]["corpus_base"])
@@ -964,68 +1130,68 @@ def run_inject(args) -> None:
     elif cfg_raw:
         raw_path = Path(cfg_raw)
     else:
-        print("ERREUR : --raw requis ou paths.raw_path absent de config.yaml")
+        log.error("--raw requis ou paths.raw_path absent de config.yaml")
         sys.exit(1)
 
     target_path = (
         Path(args.target) if args.target
-        else corpus_base / cfg["paths"]["jsonl_computervision"]
+        else corpus_base / cfg["paths"]["jsonl_clean"]
     )
 
     if not raw_path.is_file():
-        print(f"ERREUR : raw introuvable : {raw_path}")
+        log.error("raw introuvable : %s", raw_path)
         sys.exit(1)
     if not target_path.is_file():
-        print(f"ERREUR : target introuvable : {target_path}")
+        log.error("target introuvable : %s", target_path)
         sys.exit(1)
 
-    print(f"Lecture de {target_path.name}...")
+    log.info("Lecture de %s...", target_path.name)
     with open(target_path, encoding="utf-8") as f:
-        existing_ids = {json.loads(line)["message_id"] for line in f if line.strip()}
-    print(f"  {len(existing_ids)} messages existants")
+        ids_existants = {json.loads(line)["message_id"] for line in f if line.strip()}
+    log.info("  %d messages existants", len(ids_existants))
 
-    new_lines = []
+    nouvelles_lignes = []
     with open(raw_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             m = json.loads(line)
-            if m["message_id"] not in existing_ids:
-                new_lines.append((m["message_id"], m.get("date", "?"), m.get("media_type"), line))
+            if m["message_id"] not in ids_existants:
+                nouvelles_lignes.append((m["message_id"], m.get("date", "?"), m.get("media_type"), line))
 
-    new_lines.sort(key=lambda x: x[0])
+    nouvelles_lignes.sort(key=lambda x: x[0])
 
-    if not new_lines:
-        print("Rien à injecter — le JSONL enrichi est déjà à jour.")
+    if not nouvelles_lignes:
+        log.info("Rien à injecter — le JSONL enrichi est déjà à jour.")
         return
 
-    print(f"\n{len(new_lines)} nouveaux messages à injecter :")
+    log.info("%d nouveaux messages à injecter :", len(nouvelles_lignes))
     types: dict[str, int] = {}
-    for mid, date_str, mtype, _ in new_lines:
+    for mid, date_str, mtype, _ in nouvelles_lignes:
         t = mtype or "text"
         types[t] = types.get(t, 0) + 1
-        print(f"  msg {mid} | {date_str} | {mtype or 'texte seul'}")
-    print(f"\nRésumé types : {types}")
+        log.info("  msg %s | %s | %s", mid, date_str, mtype or "texte seul")
+    log.info("Résumé types : %s", types)
 
     if args.dry_run:
-        print("\n[dry-run] Aucune modification effectuée.")
+        log.info("[dry-run] Aucune modification effectuée.")
         return
 
     with open(target_path, "a", encoding="utf-8") as f:
-        for _, _, _, line in new_lines:
+        for _, _, _, line in nouvelles_lignes:
             f.write(line + "\n")
 
-    total = len(existing_ids) + len(new_lines)
-    print(f"\n{len(new_lines)} messages injectés dans {target_path.name}")
-    print(f"Total : {total} messages")
+    total = len(ids_existants) + len(nouvelles_lignes)
+    log.info("%d messages injectés dans %s", len(nouvelles_lignes), target_path.name)
+    log.info("Total : %d messages", total)
 
     with open(target_path, encoding="utf-8") as f:
         actual = sum(1 for line in f if line.strip())
     if actual == total:
-        print(f"Vérification OK : {actual} lignes dans le fichier.")
+        log.info("Vérification OK : %d lignes dans le fichier.", actual)
     else:
-        print(f"ATTENTION : attendu {total} lignes, trouvé {actual}.")
+        log.warning("attendu %d lignes, trouvé %d.", total, actual)
 
 
 # ── Point d'entrée ───────────────────────────────────────────────────────────
@@ -1042,44 +1208,43 @@ async def main(args=None):
     if args is None:
         args = parse_args()
 
-    api_id, api_hash, phone = load_credentials()
-    proxy_config = load_proxy_config()
+    api_id, api_hash, phone = charger_identifiants()
+    proxy_config = charger_config_proxy()
 
-    channel = parse_channel_name(args.channel)
+    channel = analyser_nom_canal(args.channel)
     output_dir = Path(args.output_dir).resolve()
 
-    print("=" * 50)
-    print("TELEGRAM SCRAPER v5.0")
-    print("=" * 50)
+    log.info("=== Telegram scraper ===")
 
     # session persistée dans le dossier du script (pas dans output_dir)
     session_path = Path(__file__).parent / "telegram_session"
 
     # Créer client avec ou sans proxy
     if proxy_config:
-        print(f"\n→ Proxy configuré: {proxy_config['proxy_type'].upper()} {proxy_config['addr']}:{proxy_config['port']}")
+        log.info("Proxy configuré : %s %s:%s",
+                 proxy_config['proxy_type'].upper(), proxy_config['addr'], proxy_config['port'])
         client = TelegramClient(str(session_path), api_id, api_hash, proxy=proxy_config)
     else:
         client = TelegramClient(str(session_path), api_id, api_hash)
 
     try:
-        print("\n→ Connexion à Telegram...")
+        log.info("Connexion à Telegram...")
         await client.start(phone=phone)
-        print("✓ Connecté!")
+        log.info("Connecté !")
 
         if args.retry:
-            await retry_missing_media(
+            await retenter_medias_manquants(
                 client=client,
                 channel_name=channel,
                 output_dir=output_dir,
                 delay=args.delay
             )
         else:
-            start_date = parse_date(args.start_date)
+            start_date = analyser_date(args.start_date)
             # end_date à 23:59:59 pour inclure toute la journée
-            end_date = parse_date(args.end_date).replace(hour=23, minute=59, second=59)
+            end_date = analyser_date(args.end_date).replace(hour=23, minute=59, second=59)
 
-            await scrape_channel(
+            await scraper_canal(
                 client=client,
                 channel_name=channel,
                 start_date=start_date,
@@ -1087,25 +1252,28 @@ async def main(args=None):
                 output_dir=output_dir,
                 delay=args.delay,
                 limit=args.limit,
-                download_media_flag=not args.no_media
+                telecharger_medias=not args.no_media
             )
 
     except KeyboardInterrupt:
         # Ctrl+C propre — les données déjà écrites sont safe (append mode)
-        print("\n\n⚠ Interrompu. Données sauvegardées.")
+        log.warning("Interrompu. Données sauvegardées.")
     finally:
         await client.disconnect()
-        print("\n→ Déconnecté.")
+        log.info("Déconnecté.")
 
 
 if __name__ == "__main__":
+    # On configure le logging partagé (console INFO + fichier WARNING horodaté)
+    init_logger("telegram_scraper")
+
     _args = parse_args()
     if _args.inject:
-        run_inject(_args)
+        executer_injection(_args)
     else:
         if not all([_args.channel, _args.start_date, _args.end_date, _args.output_dir]):
-            print("ERREUR : channel, start_date, end_date, output_dir sont requis en mode scrape.")
-            print("  Usage : python telegram_scraper.py @channel YYYY-MM-DD YYYY-MM-DD ./output")
-            print("  Injection : python telegram_scraper.py --inject [--raw ...] [--target ...]")
+            log.error("channel, start_date, end_date, output_dir sont requis en mode scrape.")
+            log.error("  Usage : python telegram_scraper.py @channel YYYY-MM-DD YYYY-MM-DD ./output")
+            log.error("  Injection : python telegram_scraper.py --inject [--raw ...] [--target ...]")
             sys.exit(1)
         asyncio.run(main(_args))

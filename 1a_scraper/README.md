@@ -1,6 +1,9 @@
 # Telegram Scraper
 
-Collecte messages et médias depuis un canal Telegram. Produit un fichier JSONL avec métadonnées et hashing pour déduplication.
+Collecte messages et médias depuis un canal Telegram. Produit un fichier JSONL
+enrichi des métadonnées fournies par la plateforme (vues, réactions, transferts)
+et de deux empreintes de hachage (MD5 exact + pHash perceptuel) pour repérer les
+doublons. Trois modes : `scrape`, `retry`, `--inject`.
 
 ## Installation
 
@@ -8,11 +11,11 @@ Collecte messages et médias depuis un canal Telegram. Produit un fichier JSONL 
 pip install -r requirements.txt
 ```
 
-Pour pouvoir utiliser l'API Telegram, créez un fichier `.env` en suivant le format du `.env.example` fourni.
+Pour pouvoir utiliser l'API de Telegram, créez un fichier `.env` en suivant le format du `.env.example` fourni.
 
 ## Utilisation
 
-**Mode scrape** — collecte dans une plage de dates :
+**Mode scrape** — collecte dans une plage de dates, une seule chaîne Telegram à la fois :
 
 ```bash
 python telegram_scraper.py @chaine 2024-01-01 2024-12-31 ./output
@@ -30,7 +33,7 @@ python telegram_scraper.py @chaine 2024-01-01 2024-12-31 ./output --retry
 **Mode inject** — intègre de nouveaux messages scrapés dans un JSONL enrichi existant, sans connexion Telegram. Idempotent (seuls les `message_id` absents sont ajoutés) :
 
 ```bash
-# Chemins depuis config.yaml (paths.raw_path et paths.jsonl_computervision)
+# Chemins depuis config.yaml (paths.raw_path et paths.jsonl_clean)
 python telegram_scraper.py --inject
 
 # Chemins explicites
@@ -45,7 +48,6 @@ python telegram_scraper.py --inject --dry-run
 ```
 output/
 ├── messages.jsonl
-├── scrape_log.json
 └── fiches/
     ├── channel_12345_photo.jpg
     ├── channel_12346_1_photo.jpg
@@ -53,29 +55,58 @@ output/
     └── channel_12347_video.mp4
 ```
 
-## Champs constituants le jsonl en output
+## Champs constituant le jsonl en output
+
+Schéma propre francisé (post-migration avril 2026). Le scraper écrit aussi
+`duree`, `largeur`, `hauteur` quand l'API Telegram les fournit (disponibles avant
+téléchargement) — l'étape E1 ffprobe les recalcule ensuite sur le fichier réel et
+ajoute les autres champs techniques (`audio_present`, `fps`, etc.).
 
 ```json
 {
-  "message_id": 12345,
-  "channel": "channelname",
-  "date": "2024-01-15T15:30:00",
-  "grouped_id": null,
-  "is_forwarded": false,
-  "media_index": null,
-  "caption": "Texte du message",
-  "media_type": "video",
-  "media_path": "fiches/channel_12345_video.mp4",
-  "media_duration": 45,
-  "media_dimensions": [1920, 1080],
-  "file_hash": "a1b2c3...",
-  "perceptual_hash": "d4c3b2...",
-  "views": 15000,
-  "forwards": 500,
-  "reactions": 120,
-  "reactions_detail": [{"emoji": "...", "count": 100}]
+  "message_id": 12345,                # ID du message relatif à l'ordre de la chaîne
+  "canal": "nom_chaine",              # Nom de la chaîne (URL : t.me/nom_chaine)
+  "date": "2024-01-15T15:30:00",      # Publication en UTC (Telegram ne fournit que de l'UTC, stocké sans suffixe timezone)
+  "album_id": null,                   # Si présent : grouped_id Telegram (album multi-médias)
+  "album_rang": null,                 # Position du média dans l'album (1, 2, 3…)
+  "est_transfere": false,             # True si le message est republié depuis une autre chaîne
+  "legende": "Texte du message",      # Texte/légende du média
+  "liens_externes": [                 # Liens des entités Telegram (inline + URL brutes)
+    {"url": "https://x.com/...", "texte": "Twitter"},   # lien inline (ancre affichée)
+    {"url": "https://youtu.be/xxxxx", "texte": null}    # URL brute déjà visible dans legende
+  ],
+  "media_type": "video",              # "photo"|"video"|"audio"|"document"|"other"|null (texte seul) — seuls photo/video/audio sont téléchargés
+  "media_chemin": "fiches/canal_12345_video.mp4",  # Chemin relatif du fichier
+  "duree": 45,                        # Secondes (métadonnées Telegram — recalculé par ffprobe en E1)
+  "largeur": 1920,                    # Pixels (idem)
+  "hauteur": 1080,                    # Pixels (idem)
+  "fichier_hash": "a1b2c3...",        # MD5 du fichier (déduplication exacte)
+  "perceptual_hash": "d4c3b2...",     # pHash visuel (déduplication post-recompression)
+  "vues": 15000,                      # Vues totales à l'instant du scraping
+  "transferts": 500,                  # Nombre de partages vers d'autres chaînes/utilisateurs
+  "reactions": 120,                   # Nombre total de réactions (emojis)
+  "reactions_detail": [               # Détail par emoji
+    {"emoji": "👍", "count": 100},
+    {"emoji": "❤", "count": 20}
+  ]
 }
 ```
+
+## Liens externes — entités Telegram
+
+Le champ `liens_externes` capture les liens que le texte brut de la légende ne
+contient pas. Telegram stocke les URL « inline » (texte cliquable dont l'URL
+n'apparaît pas dans la légende) dans les entités du message
+(`MessageEntityTextUrl` / `MessageEntityUrl`), pas dans le texte brut. Le scraper
+les extrait à la volée via `extraire_liens_externes()` :
+
+- `MessageEntityTextUrl` → lien inline : `texte` = ancre affichée (ex. « Twitter »)
+- `MessageEntityUrl` → URL brute déjà visible dans `legende` : `texte` = `null`
+- `[]` = message sans lien
+
+Les offsets d'entités sont décodés en UTF-16LE pour corriger le décalage causé par
+les emojis du plan astral (🇺🇦, 🏦…) qui précèdent souvent les URL : Telegram compte
+les offsets en code units UTF-16, alors que Python indexe en code points.
 
 ## Méthodologie
 
