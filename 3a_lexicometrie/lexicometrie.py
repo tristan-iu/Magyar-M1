@@ -11,7 +11,8 @@ Ce qu'il produit : des CSV dans --output-dir —
     temporal_stats_{...}.csv                     : mêmes stats par période temporelle
     volcano_{...}.csv                            : log2FC + p-valeur ajustée (BH) par paire
 
-Ce script ne produit AUCUNE figure — voir plot_lexico.py pour les visualisations.
+Ce script ne produit AUCUNE figure — elles viennent des analyses dérivées
+(lda_topics, afc, cah…) et des scripts R (3b_stats_R).
 
 Pipeline interne :
   1. Chargement du JSONL et des phases depuis config.yaml
@@ -613,7 +614,6 @@ def main():
                 print(f"  Volcano {src} : pas assez de données.")
 
     print(f"\nTerminé. CSVs dans : {args.output_dir}")
-    print("Pour générer les figures : python plot_lexico.py --output-dir", args.output_dir)
 
 
 if __name__ == "__main__":

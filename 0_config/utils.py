@@ -3,7 +3,7 @@ utils.py — Utilitaires partagés du pipeline Magyar.
 
 Sections :
   - CLI         : creer_parser_base(), analyser_date_arg()
-  - PHASES      : etiquette_phase()
+  - PHASES      : etiquette_phase(), PHASE_SHORT
   - LOGGING     : init_logger()
   - IDEMPOTENCE : est_traite()
   - JSONL I/O   : read_jsonl(), write_jsonl()
@@ -154,6 +154,18 @@ def etiquette_phase(dt: str | datetime | date, cfg: dict | None = None) -> str |
         if debut <= dt <= fin:
             return phase_id
     return None
+
+
+# Mappe les libellés longs de la colonne `phase` des CSV lemmes_*.csv
+# ('P1_Artisanal'…) vers les étiquettes courtes ('P1'…) utilisées dans les
+# colonnes/légendes des sorties. Partagé par les scripts de 3a_lexicometrie
+# qui agrègent par phase (lda_topics, kwic, collocations, comparaison_sources,
+# ner_lieux).
+PHASE_SHORT = {
+    "P1_Artisanal":     "P1",
+    "P2_Semi-pro":      "P2",
+    "P3_Institutionnel": "P3",
+}
 
 
 # ---------------------------------------------------------------------------

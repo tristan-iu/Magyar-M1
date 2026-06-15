@@ -32,9 +32,7 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[1]
 _UTILS_DIR = _REPO / "0_config"
 sys.path.insert(0, str(_UTILS_DIR))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from utils import load_config  # noqa: E402
-from categories_semantiques import PHASE_SHORT  # noqa: E402
+from utils import load_config, PHASE_SHORT  # noqa: E402
 
 # CSV/HTML écrits dans 4_data_et_viz/lexico/ ; figures PNG un cran au-dessus
 # (4_data_et_viz/) pour rejoindre les autres figures du mémoire.

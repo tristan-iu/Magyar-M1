@@ -31,8 +31,7 @@ import pandas as pd
 
 _UTILS_DIR = Path(__file__).resolve().parents[1] / "0_config"
 sys.path.insert(0, str(_UTILS_DIR))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from categories_semantiques import PHASE_SHORT  # noqa: E402
+from utils import PHASE_SHORT  # noqa: E402
 
 # Les CSV de lemmes sont produits par lexicometrie.py dans 4_data_et_viz/lexico/.
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "4_data_et_viz" / "lexico"

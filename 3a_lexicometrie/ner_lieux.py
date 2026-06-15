@@ -38,12 +38,10 @@ from pathlib import Path
 
 _UTILS_DIR = Path(__file__).resolve().parents[1] / "0_config"
 sys.path.insert(0, str(_UTILS_DIR))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils import (  # noqa: E402
     load_config, read_jsonl, etiquette_phase,
-    creer_parser_base, filtrer_eligibles,
+    creer_parser_base, filtrer_eligibles, PHASE_SHORT,
 )
-from categories_semantiques import PHASE_SHORT  # noqa: E402
 
 # CSV de toponymes écrits dans 4_data_et_viz/lexico/ ; heatmaps PNG un cran
 # au-dessus (4_data_et_viz/) pour rejoindre les autres figures du mémoire.

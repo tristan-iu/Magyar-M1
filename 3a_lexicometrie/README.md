@@ -1,6 +1,6 @@
 # Lexicométrie
 
-Lemmatisation ukrainienne (spaCy `uk_core_news_trf`), TF-IDF par phase et analyses exploratoires (LDA, AFC, CAH, spécificités, cooccurrences, KWIC) du corpus. Les légendes des publications et les dialogues transcrits sont traités comme deux corpus distincts tout au long du module.
+Lemmatisation ukrainienne (spaCy `uk_core_news_trf`), TF-IDF par phase et analyses exploratoires (LDA, AFC, CAH, cooccurrences, KWIC) du corpus. Les légendes des publications et les dialogues transcrits sont traités comme deux corpus distincts tout au long du module.
 
 ## Installation
 
@@ -26,19 +26,12 @@ python lexicometrie.py --input messages_clean.jsonl
 python lda_topics.py        # topic modeling LDA (gensim)
 python afc.py               # analyse factorielle des correspondances
 python cah.py               # classification ascendante hiérarchique
-python specificites.py      # spécificités de Lafon (hypergéométrique)
 python cooccurrences.py     # réseaux de cooccurrences (PMI), --per-phase pour un export par phase
 python collocations.py      # bigrammes significatifs (G² de Dunning)
 python kwic.py              # concordancier
 python comparaison_sources.py   # recouvrement lexical légendes / dialogues
 python ner_lieux.py --input messages_clean.jsonl   # toponymes (exploratoire)
-
-# Figures
-python plot_lexico.py
-python plot_tfidf_vertical.py
 ```
-
-Les scripts `36_*.py` produisent les tableaux et slope charts TF-IDF du mémoire à partir des mêmes CSV.
 
 ## Output
 
@@ -56,4 +49,4 @@ Tout est écrit dans `4_data_et_viz/` à la racine du dépôt (gitignoré, rég�
 
 **Filtre de confiance :** les dialogues dont `dialogue_confiance` est sous 0.5 sont exclus par défaut, pour ne pas faire entrer les transcriptions suspectes (hallucinations Whisper) dans les comptages lexicaux.
 
-**Évaluation de la lemmatisation :** `evaluate_lemmas.py` tire un échantillon stratifié (100 tokens par phase) à annoter manuellement, puis calcule l'accuracy de spaCy sur cette annotation. Les échantillons annotés utilisés dans le mémoire ne sont pas publiés dans le dépôt, ils contiennent du texte du corpus (disponibles sur demande).
+**Évaluation de la lemmatisation :** l'accuracy de spaCy a été mesurée sur un échantillon stratifié (100 tokens par phase et par source) annoté manuellement. Les échantillons annotés ne sont pas publiés dans le dépôt, ils contiennent du texte du corpus (disponibles sur demande).

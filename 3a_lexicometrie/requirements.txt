@@ -14,12 +14,11 @@ prince
 # cooccurrences.py — réseaux de cooccurrences
 networkx
 
-# plot_lexico.py / figures (36*, ner_lieux, collocations…)
+# figures (ner_lieux, collocations, lda_topics…)
 matplotlib
 numpy
 
-# evaluate_lemmas.py, cah.py, kwic.py, comparaison_sources.py,
-# specificites.py (scipy.stats.hypergeom — spécificités de Lafon)
+# cah.py, kwic.py, comparaison_sources.py
 # (pandas / scikit-learn / scipy / matplotlib / numpy déjà listés)
 
 # pyyaml : requis par 0_config/utils.py (load_config)
