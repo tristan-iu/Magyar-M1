@@ -1,7 +1,7 @@
 # Dépôt M1 SDHC 
 Ensemble du code utilisé dans le cadre du mémoire de M1 SDHC. 
 
-Le corpus porte sur les publications de la chaîne Telegram du commandant de drones ukrainien Robert « *Madyar* » Brovdi ([@robert_magyar](https://t.me/robert_magyar)), de septembre 2022 à septembre 2025 — 1365 messages couvrant trois phases de production (artisanale, semi-professionnelle, institutionnelle). Le corpus n'est pas inclus dans le dépôt ; la chaîne est publique et la collecte reproductible.
+Le corpus porte sur les publications de la chaîne Telegram du commandant de drones ukrainien Robert « *Madyar* » Brovdi ([@robert_magyar](https://t.me/robert_magyar)) : 1365 messages couvrant trois ans de production (septembre 2022 à septembre 2025). Le corpus n'est pas inclus dans le dépôt ; la chaîne est publique et la collecte reproductible.
 
 ## Structure du dépôt
 
@@ -18,11 +18,11 @@ La numérotation correspond à l'ordre d'exécution : (1) collecte, (2) enrichis
 │   │   ├── keyframer.py           Pipeline keyframes fixes (ffmpeg, 1/10s) + OCR + SceneDetect
 │   │   └── scene_detect.py        Détection de scènes standalone (HistogramDetector fallback)
 │   ├── visages/               Détection des visages via InsightFace 
-│   ├── clip/                  Classification zero-shot via CLIP
+│   ├── clip/                  Classification zero-shot via CLIP (non-concluant, abandonné)
 │   └── blasons/               Détection logos de brigade via SIFT & RANSAC
-├── 3a_lexicometrie/     Analyse textuelle (lemmatisation spaCy, TF-IDF, spécificités, LDA, AFC, CAH)
-├── 3b_stats_R/          Analyses quantitatives et figures du mémoire (R + ggplot2)
-└── 3c_couleurs/         Analyse colorimétrique HSV des keyframes (entropie, PCA, similarité)
+├── 3a_lexicometrie/     Analyse textuelle (lemmatisation spaCy, TF-IDF, LDA, AFC, CAH)
+├── 3b_stats_R/          Analyses quantitatives et figures du mémoire 
+└── 3c_couleurs/         Analyse colorimétrique HSV des keyframes 
 ```
 
 ## Utilisation
@@ -33,7 +33,7 @@ Se référer au README de chaque module. Tous les scripts sont paramétrables vi
 python3 script.py --input corpus.jsonl --output corpus_enrichi.jsonl
 ```
 
-L'utilisation sur d'autres chaînes Telegram n'est pas garantie, en particulier pour les langues autres que l'ukrainien (modifier le prompt Whisper, les modèles spaCy et OCR). 
+L'utilisation sur d'autres chaînes Telegram n'est pas garantie, en particulier pour les langues autres que l'ukrainien (modifier le prompt Whisper, les modèles spaCy et de Computer Vision). 
 
 ## Dépendances
 

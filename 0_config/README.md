@@ -1,6 +1,6 @@
 # Configuration centrale et utilitaires partagés
 
-Ce module fournit la configuration commune à tout le pipeline (`config.yaml`) et la bibliothèque partagée `utils.py` qu'importent les scripts d'enrichissement (CLI standard, I/O JSONL, logging, idempotence, phases du corpus). Aucun traitement de données ici : c'est la fondation dont dépendent les modules `1a_scraper/` à `3d_couleurs/`.
+Ce module fournit la configuration commune à tout le pipeline (`config.yaml`) et la bibliothèque partagée `utils.py` qu'importent les scripts d'enrichissement (CLI standard, I/O JSONL, logging, idempotence, phases du corpus). Aucun traitement de données ici : c'est la fondation dont dépendent les modules `1a_scraper/` à `3c_couleurs/`.
 
 ## Installation
 
