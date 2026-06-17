@@ -3,7 +3,7 @@ library(jsonlite)
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 # INFILE : corpus enrichi canonique — chemin local à adapter (corpus disponible sur demande)
-INFILE  <- "/media/elwin/NVME-div/M1_corpus/processed/messages_clean.jsonl"
+INFILE  <- "/chemin/vers/corpus/messages_clean.jsonl"
 
 # OUTFILE : corpus allégé, écrit à côté de ce script — aucun réglage requis
 this_file <- local({

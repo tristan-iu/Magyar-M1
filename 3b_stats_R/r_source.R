@@ -10,7 +10,7 @@ library(stringr)
 
 # Chemin corpus local — seul réglage machine-spécifique de tout le module
 # (corpus non inclus dans le dépôt, disponible sur demande)
-chemin_jsonl <- "/media/elwin/NVME-div/M1_corpus/processed/messages_clean.jsonl"
+chemin_jsonl <- "/chemin/vers/corpus/messages_clean.jsonl"
 
 df_brut <- stream_in(file(chemin_jsonl), flatten = TRUE)
 
